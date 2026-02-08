@@ -9,8 +9,8 @@ from typing import Any, Iterable, Optional
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Faster-Whisper + Kokoro ONNX demo (Raspberry Pi)")
-    # models/ 는 Demo 폴더 안에 둠 (Demo/models/kokoro/...)
-    default_root = Path(__file__).resolve().parent
+    # models/ 는 프로젝트 루트에 둠 (rpi-voice-demo/models/kokoro/onnx/model_quantized.onnx, voices-v1.0.bin)
+    default_root = Path(__file__).resolve().parent.parent
     parser.add_argument("--record-seconds", type=float, default=3.0, help="Record duration per turn (seconds).")
     parser.add_argument("--input-device", type=int, default=None, help="sounddevice input device index (None=default).")
     parser.add_argument("--output-device", type=int, default=None, help="sounddevice output device index (None=default).")
@@ -19,14 +19,14 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--kokoro-model",
         type=Path,
-        default=default_root / "models" / "kokoro" / "kokoro-v0_19.onnx",
+        default=default_root / "models" / "kokoro" / "onnx" / "model_quantized.onnx",
         help="Path to Kokoro ONNX model file.",
     )
     parser.add_argument(
         "--kokoro-voices",
         type=Path,
-        default=default_root / "models" / "kokoro" / "voices.bin",
-        help="Path to Kokoro voices file (NumPy .npz, must be voices.bin from kokoro-onnx releases).",
+        default=default_root / "models" / "kokoro" / "voices-v1.0.bin",
+        help="Path to Kokoro voices file (e.g. voices-v1.0.bin from kokoro-onnx releases).",
     )
     parser.add_argument("--voice", type=str, default="af_alloy", help="Voice id (e.g., af_alloy, af_bella, am_adam).")
     parser.add_argument("--volume", type=float, default=1.0, help="Playback volume 0.0–1.0 (default 1.0).")
