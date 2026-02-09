@@ -3,16 +3,14 @@ rpi-voice-demo
 
 ## Overview
 
-Voice demo for Raspberry Pi:
+Voice demo for Raspberry Pi (single-mode sherpa-onnx):
 
-- STT (baseline): sherpa-onnx (low-latency)
-- STT (custom): Faster-Whisper (`distil-small.en`)
+- STT: sherpa-onnx streaming Zipformer (low-latency)
 - Emotion: ONNX BERT classifier (GoEmotions-style, optional)
 - Intent: simple LOCAL vs CLOUD routing based on sentence embeddings
 - LOCAL LLM: Ollama (e.g. `smollm2:360m`) on the Pi
 - CLOUD LLM: external HTTP API hook (optional)
-- TTS (baseline): sherpa-onnx VITS (LJ Speech, single-speaker)
-- TTS (custom): Kokoro ONNX
+-- TTS: sherpa-onnx VITS (LJ Speech, single-speaker)
 
 Run from the directory that contains the `Demo/` package:
 
@@ -20,19 +18,11 @@ Run from the directory that contains the `Demo/` package:
 python -m Demo
 ```
 
-The behavior is controlled by `DEMO_MODE`:
-
-- `DEMO_MODE=baseline` (default): sherpa-onnx STT + sherpa-onnx TTS front-end + existing emotion/intent/LLM pipeline.
-- `DEMO_MODE=custom`: original Faster-Whisper STT + Kokoro TTS front-end.
-
 Examples:
 
 ```bash
-# Baseline (sherpa-onnx STT)
+# Single-mode sherpa-onnx STT/TTS + brain
 python -m Demo
-
-# Custom pipeline (Faster-Whisper + Ollama)
-DEMO_MODE=custom python -m Demo --ollama --ollama-model smollm2:360m
 ```
 
 ## Environment flags (RPi)
@@ -122,27 +112,6 @@ emotion_onnx_int8/
 ```
 
 The first run requires network access to HuggingFace; after that, the directory can be reused offline.
-
-## Kokoro TTS model files
-
-The Kokoro ONNX TTS model and voices are also **not stored in git**.  
-On the Raspberry Pi, they are downloaded by the same helper script:
-
-```bash
-source venv/bin/activate
-python download_model.py
-```
-
-This will additionally create:
-
-```text
-models/
-  kokoro/
-    voices-v1.0.bin
-    model_quantized.onnx
-```
-
-using the official `kokoro-onnx` GitHub release URLs. After this, `python -m Demo` can use Kokoro for TTS.
 
 ## sherpa-onnx STT/TTS model files
 

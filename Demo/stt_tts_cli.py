@@ -8,27 +8,13 @@ from typing import Any, Iterable, Optional
 
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Faster-Whisper + Kokoro ONNX demo (Raspberry Pi)")
-    # models/ 는 프로젝트 루트에 둠 (rpi-voice-demo/models/kokoro/model_quantized.onnx, voices-v1.0.bin)
+    parser = argparse.ArgumentParser(description="sherpa-onnx STT/TTS voice demo (Raspberry Pi)")
     default_root = Path(__file__).resolve().parent.parent
     parser.add_argument("--record-seconds", type=float, default=3.0, help="Record duration per turn (seconds).")
     parser.add_argument("--input-device", type=int, default=None, help="sounddevice input device index (None=default).")
     parser.add_argument("--output-device", type=int, default=None, help="sounddevice output device index (None=default).")
-    parser.add_argument("--beam-size", type=int, default=1, help="Beam size for Faster-Whisper.")
-    parser.add_argument("--asr-compute-type", type=str, default="int8", help="Faster-Whisper compute type (e.g., int8).")
-    parser.add_argument(
-        "--kokoro-model",
-        type=Path,
-        default=default_root / "models" / "kokoro" / "model_quantized.onnx",
-        help="Path to Kokoro ONNX model file.",
-    )
-    parser.add_argument(
-        "--kokoro-voices",
-        type=Path,
-        default=default_root / "models" / "kokoro" / "voices-v1.0.bin",
-        help="Path to Kokoro voices file (e.g. voices-v1.0.bin from kokoro-onnx releases).",
-    )
-    parser.add_argument("--voice", type=str, default="af_alloy", help="Voice id (e.g., af_alloy, af_bella, am_adam).")
+    # sherpa-onnx STT/TTS does not require explicit model paths here; they are
+    # controlled by download_model.py and environment variables.
     parser.add_argument("--volume", type=float, default=1.0, help="Playback volume 0.0–1.0 (default 1.0).")
     parser.add_argument("--trim-start", type=float, default=0.0, help="Trim this many seconds from start of TTS audio (default 0).")
     parser.add_argument("--ollama", action="store_true", help="Send STT text to Ollama and TTS the reply (voice chatbot).")
@@ -66,11 +52,6 @@ def print_config(args: argparse.Namespace, voice: str) -> None:
         "record_seconds",
         "input_device",
         "output_device",
-        "beam_size",
-        "asr_compute_type",
-        "kokoro_model",
-        "kokoro_voices",
-        "voice",
         "volume",
         "trim_start",
         "ollama",
@@ -86,6 +67,6 @@ def print_config(args: argparse.Namespace, voice: str) -> None:
     ]:
         if hasattr(args, key):
             d[key] = _arg_to_json_value(getattr(args, key))
-    d["voice"] = voice  # resolved voice (may differ from args.voice)
+    d["voice"] = voice  # resolved voice (kept for backward compatibility)
     print("--- config ---")
     print(json.dumps(d, indent=2))
