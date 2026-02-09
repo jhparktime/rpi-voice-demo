@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any, Iterable, List, Optional, Tuple
 
 import numpy as np
-from kokoro_onnx import Kokoro
 
 from . import audio_io
 from . import cloud_llm
@@ -24,7 +23,6 @@ from . import llm_onnx
 from . import stt_sherpa
 from . import stt_tts_cli
 from . import text_utils
-from . import tts_kokoro
 from . import tts_sherpa
 from .emotion import EmotionClassifierONNX, EmotionResult
 from .intent_router import classify_intent_easy_or_complex
@@ -37,8 +35,8 @@ ENABLE_CLOUD_FILLER = os.environ.get("ENABLE_CLOUD_FILLER", "1").strip() not in 
 FORCE_MODE = (os.environ.get("FORCE_MODE", "") or "").strip().upper()
 
 
-def _synthesize_tts(tts: Kokoro, voice: str, text: str, speed: float = 1.0) -> Tuple[np.ndarray, int]:
-    """TTS helper: always use sherpa-onnx OfflineTts backend."""
+def _synthesize_tts(tts: Any, voice: str, text: str, speed: float = 1.0) -> Tuple[np.ndarray, int]:
+    """TTS helper: always use sherpa-onnx OfflineTts backend (tts/voice are unused)."""
     audio, sr = tts_sherpa.synthesize_sherpa_tts(text, speed=speed)
     if sr <= 0 or audio.size == 0:
         raise RuntimeError("sherpa-onnx TTS synthesis failed")
@@ -403,26 +401,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         print("[error] --trim-start must be >= 0.", file=sys.stderr)
         return 1
 
-    try:
-        tts = Kokoro(
-            model_path=str(args.kokoro_model),
-            voices_path=str(args.kokoro_voices),
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"[fatal] TTS model load failed: {exc}", file=sys.stderr)
-        return 1
-
-    available_voices = tts.get_voices()
-    voice = args.voice
-    if voice not in available_voices:
-        voice = available_voices[0] if available_voices else "af_alloy"
-        print(f"[info] voice '{args.voice}' not found, using '{voice}'. Available: {available_voices}", file=sys.stderr)
+    # sherpa-onnx TTS backend (OfflineTts) is configured in Demo/tts_sherpa.py
+    # and download_model.py, so we don't need to load a separate TTS model here.
+    tts = None
+    voice = "sherpa_default"
 
     print("Voice demo (sherpa-onnx single mode)")
     print("- ASR: sherpa-onnx (streaming Zipformer)")
-    print(f"- TTS model: {args.kokoro_model}")
-    print(f"- TTS voices: {args.kokoro_voices}")
-    print(f"- voice: {voice} (available: {available_voices})")
+    print("- TTS: sherpa-onnx VITS (vits-coqui-en-ljspeech)")
     print(f"- volume: {args.volume}")
     print(f"- trim-start: {args.trim_start}s")
     print(f"- record seconds: {args.record_seconds}")
