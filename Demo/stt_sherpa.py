@@ -188,7 +188,7 @@ def transcribe_sherpa(audio: np.ndarray, sample_rate: int) -> str:
             # Log partial result every 10 chunks (~1 second)
             if chunk_count % 10 == 0:
                 partial_result = recognizer.get_result(stream)
-                partial_text = getattr(partial_result, "text", "") or ""
+                partial_text = str(partial_result).strip()
                 if partial_text:
                     print(f"[sherpa-debug] partial @{chunk_count}chunks: {repr(partial_text)}", flush=True)
             
@@ -204,9 +204,9 @@ def transcribe_sherpa(audio: np.ndarray, sample_rate: int) -> str:
             recognizer.decode_stream(stream)
 
         result = recognizer.get_result(stream)
-        text = getattr(result, "text", "") or ""
+        text = str(result).strip()
         print(f"[sherpa] raw result: {repr(text)}", flush=True)
-        return text.strip()
+        return text
     except Exception as exc:  # pragma: no cover
         print(f"[sherpa] transcribe error: {exc}", flush=True)
         return ""
@@ -261,7 +261,8 @@ def stream_recognize_until_endpoint(
 
                 is_endpoint = recognizer.is_endpoint(stream)
                 result = recognizer.get_result(stream)
-                current_text = getattr(result, "text", "") or ""
+                # sherpa-onnx OnlineRecognizer returns a result object that has __str__
+                current_text = str(result).strip()
 
                 # Debug: log partial results when they change
                 if current_text and current_text != last_logged_text:
@@ -269,7 +270,7 @@ def stream_recognize_until_endpoint(
                     last_logged_text = current_text
 
                 if is_endpoint:
-                    text = current_text.strip()
+                    text = current_text
                     if text:
                         print(f"[sherpa] endpoint detected: {repr(text)}", flush=True)
                     else:
@@ -289,7 +290,7 @@ def stream_recognize_until_endpoint(
             while recognizer.is_ready(stream):
                 recognizer.decode_stream(stream)
             result = recognizer.get_result(stream)
-            text = (getattr(result, "text", "") or "").strip()
+            text = str(result).strip()
             if text:
                 print(f"[sherpa] finalized text: {repr(text)}", flush=True)
         except Exception:
@@ -376,7 +377,7 @@ def vad_stream_recognize_one(
                             recognizer.decode_stream(stream)
 
                         result = recognizer.get_result(stream)
-                        text = (getattr(result, "text", "") or "").strip()
+                        text = str(result).strip()
                         print(f"[sherpa-vad] utterance: {repr(text)}", flush=True)
 
                         stream = None
@@ -395,7 +396,7 @@ def vad_stream_recognize_one(
             while recognizer.is_ready(stream):
                 recognizer.decode_stream(stream)
             result = recognizer.get_result(stream)
-            text = (getattr(result, "text", "") or "").strip()
+            text = str(result).strip()
         except Exception:
             pass
 
