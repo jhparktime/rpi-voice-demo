@@ -38,7 +38,8 @@ ONNX_REPO = "Cohee/distilbert-base-uncased-go-emotions-onnx"
 
 TOKENIZER_FILES: Iterable[str] = (
     "config.json",
-    "tokenizer.json",
+    # Many DistilBERT checkpoints do not provide tokenizer.json; we rely on
+    # tokenizer_config.json + vocab.txt + special_tokens_map.json instead.
     "tokenizer_config.json",
     "special_tokens_map.json",
     "vocab.txt",
@@ -102,8 +103,9 @@ def main() -> int:
             src = tok_cache_path / name
             dst = emotion_dir / name
             if not src.exists():
-                print(f"[error] Missing expected file in tokenizer repo: {src}", file=sys.stderr)
-                return 1
+                # Some files (like tokenizer.json) may be omitted in certain repos.
+                print(f"[warn] Optional tokenizer file missing in repo: {src}")
+                continue
             print(f"[info] Copying {src} -> {dst}")
             shutil.copy2(src, dst)
 
