@@ -11,7 +11,7 @@ Voice demo for Raspberry Pi:
 - Intent: simple LOCAL vs CLOUD routing based on sentence embeddings
 - LOCAL LLM: Ollama (e.g. `smollm2:360m`) on the Pi
 - CLOUD LLM: external HTTP API hook (optional)
-- TTS (baseline): sherpa-onnx VITS Piper (GLaDOS)
+- TTS (baseline): sherpa-onnx VITS (LJ Speech, single-speaker)
 - TTS (custom): Kokoro ONNX
 
 Run from the directory that contains the `Demo/` package:
@@ -158,7 +158,7 @@ For the baseline mode, we use sherpa-onnx for both STT and TTS.
     joiner.onnx
   ```
 
-- `Demo/tts_sherpa.py` expects an English VITS Piper TTS model under:
+- `Demo/tts_sherpa.py` expects an English VITS TTS model under:
 
   ```text
   sherpa_tts/
@@ -171,4 +171,4 @@ These files are **not stored in git**.
 `download_model.py` will automatically download and prepare:
 
 - A small English streaming STT model (Zipformer, ~20M params) into `sherpa_stt/`
-- An English VITS Piper TTS model (GLaDOS voice) into `sherpa_tts/`
+- An English VITS TTS model (vits-coqui-en-ljspeech + espeak-ng-data) into `sherpa_tts/`

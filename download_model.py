@@ -49,19 +49,27 @@ KOKORO_VOICES_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/downlo
 KOKORO_ONNX_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx"
 
 # sherpa-onnx STT: small English streaming Zipformer model (~20M params).
-# We hard-code a stable release archive and extract/copy the needed files.
+# We hard-code the same archive that was used in the previous Raspberry Pi
+# experiments and extract/copy the needed files.
 SHERPA_ASR_ARCHIVE_URL = (
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
     "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2"
 )
 SHERPA_ASR_ARCHIVE_NAME = "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2"
 
-# sherpa-onnx TTS: English VITS Piper model (GLaDOS voice, ~61 MB).
+# sherpa-onnx TTS: English VITS model matching the previous Raspberry Pi
+# setup (vits-coqui-en-ljspeech) plus a shared espeak-ng-data bundle.
 SHERPA_TTS_ARCHIVE_URL = (
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/"
-    "vits-piper-en_US-glados.tar.bz2"
+    "vits-coqui-en-ljspeech.tar.bz2"
 )
-SHERPA_TTS_ARCHIVE_NAME = "vits-piper-en_US-glados.tar.bz2"
+SHERPA_TTS_ARCHIVE_NAME = "vits-coqui-en-ljspeech.tar.bz2"
+
+ESPEAK_DATA_ARCHIVE_URL = (
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/"
+    "espeak-ng-data.tar.bz2"
+)
+ESPEAK_DATA_ARCHIVE_NAME = "espeak-ng-data.tar.bz2"
 
 
 def _download_file(url: str, dst: Path, desc: str) -> None:
@@ -157,7 +165,8 @@ def _ensure_sherpa_stt(root: Path) -> bool:
 def _ensure_sherpa_tts(root: Path) -> bool:
     """Download and prepare sherpa-onnx English TTS into sherpa_tts/.
 
-    Uses the vits-piper-en_US-glados model (~61 MB).
+    Uses the vits-coqui-en-ljspeech model (single-speaker English, LJ Speech)
+    plus a shared espeak-ng-data directory, matching the previous Pi setup.
     Returns True if ready, False on failure (but does not raise).
     """
     tts_dir = root / "sherpa_tts"
@@ -171,37 +180,69 @@ def _ensure_sherpa_tts(root: Path) -> bool:
 
     tmp_dir = root / ".tmp_sherpa_tts"
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    archive_path = tmp_dir / SHERPA_TTS_ARCHIVE_NAME
+    tts_archive_path = tmp_dir / SHERPA_TTS_ARCHIVE_NAME
+    espeak_archive_path = tmp_dir / ESPEAK_DATA_ARCHIVE_NAME
 
     try:
-        if not archive_path.exists():
-            _download_file(SHERPA_TTS_ARCHIVE_URL, archive_path, "sherpa-onnx English TTS (vits-piper-en_US-glados)")
+        if not tts_archive_path.exists():
+            _download_file(
+                SHERPA_TTS_ARCHIVE_URL,
+                tts_archive_path,
+                "sherpa-onnx English TTS (vits-coqui-en-ljspeech)",
+            )
+        if not espeak_archive_path.exists():
+            _download_file(
+                ESPEAK_DATA_ARCHIVE_URL,
+                espeak_archive_path,
+                "sherpa-onnx TTS espeak-ng-data",
+            )
     except Exception as exc:  # noqa: BLE001
-        print(f"[error] Failed to download sherpa-onnx TTS archive: {exc}", file=sys.stderr)
+        print(f"[error] Failed to download sherpa-onnx TTS archives: {exc}", file=sys.stderr)
         return False
 
-    # Extract archive
+    # Extract archives
     try:
         import tarfile
 
-        with tarfile.open(archive_path, "r:bz2") as tar:
+        with tarfile.open(tts_archive_path, "r:bz2") as tar:
+            tar.extractall(path=tmp_dir)
+        with tarfile.open(espeak_archive_path, "r:bz2") as tar:
             tar.extractall(path=tmp_dir)
     except Exception as exc:  # noqa: BLE001
-        print(f"[error] Failed to extract sherpa-onnx TTS archive: {exc}", file=sys.stderr)
+        print(f"[error] Failed to extract sherpa-onnx TTS archives: {exc}", file=sys.stderr)
         return False
 
-    # Expect directory vits-piper-en_US-glados/
-    model_root = tmp_dir / "vits-piper-en_US-glados"
+    # Locate model directory: prefer vits-coqui-en-ljspeech/, but fall back to
+    # any directory with tokens.txt and at least one *.onnx file.
+    model_root = tmp_dir / "vits-coqui-en-ljspeech"
     if not model_root.exists():
-        # Fallback: first dir with expected files
         for p in tmp_dir.iterdir():
-            if p.is_dir() and (p / "tokens.txt").exists():
+            if p.is_dir() and (p / "tokens.txt").exists() and list(p.glob("*.onnx")):
                 model_root = p
                 break
 
-    src_model = model_root / "en_US-glados.onnx"
+    if not model_root.exists():
+        print(f"[error] Could not locate sherpa-onnx TTS model directory in {tmp_dir}", file=sys.stderr)
+        return False
+
+    # Pick an ONNX model file (if multiple, choose the first sorted one).
+    onnx_candidates = sorted(model_root.glob("*.onnx"))
+    if not onnx_candidates:
+        print(f"[error] No ONNX model found under {model_root}", file=sys.stderr)
+        return False
+    src_model = onnx_candidates[0]
     src_tokens = model_root / "tokens.txt"
-    src_data = model_root / "espeak-ng-data"
+
+    # Locate espeak-ng-data directory (may live at top level after extraction).
+    espeak_candidates = []
+    for p in tmp_dir.rglob("espeak-ng-data"):
+        if p.is_dir():
+            espeak_candidates.append(p)
+            break
+    if not espeak_candidates:
+        print(f"[error] espeak-ng-data directory not found under {tmp_dir}", file=sys.stderr)
+        return False
+    src_data = espeak_candidates[0]
 
     if not (src_model.exists() and src_tokens.exists() and src_data.exists()):
         print(f"[error] Missing expected sherpa-onnx TTS files under {model_root}", file=sys.stderr)
@@ -308,7 +349,7 @@ def main() -> int:
     # sherpa-onnx STT assets (English, streaming Zipformer, ~20M params)
     sherpa_stt_ready = _ensure_sherpa_stt(root)
 
-    # sherpa-onnx TTS assets (English VITS Piper, GLaDOS voice)
+    # sherpa-onnx TTS assets (English VITS LJSpeech, via vits-coqui-en-ljspeech)
     sherpa_tts_ready = _ensure_sherpa_tts(root)
 
     # Final status summary (best-effort)
