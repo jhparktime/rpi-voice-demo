@@ -96,3 +96,16 @@ def build_cloud_system_prompt(emotion_label: str | None) -> str:
         f"{emo_hint}"
     )
 
+
+def build_cloud_filler_system_prompt(emotion_label: str | None) -> str:
+    """CLOUD filler prompt for LOCAL sLLM: brief spoken bridge, no answering."""
+    emo_hint = f"\nEmotionHint: {emotion_label}" if emotion_label else ""
+    return (
+        "You are a friendly, supportive buddy.\n"
+        "Do NOT answer the user's question.\n"
+        "Reply in English with a very short, natural, spoken bridge message (1 short sentence is enough).\n"
+        "Acknowledge what they said and say you'll check or think about it, but do not give the actual answer.\n"
+        "Sound casual and warm, not formal; no emojis, no lists, no technical details."
+        f"{emo_hint}"
+    )
+

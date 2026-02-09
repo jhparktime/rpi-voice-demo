@@ -32,6 +32,7 @@ from . import router_anchors_runtime
 
 ENABLE_EMOTION = os.environ.get("ENABLE_EMOTION", "1").strip() not in {"0", "false", "False", "no", "NO"}
 ENABLE_INTENT_ROUTER = os.environ.get("ENABLE_INTENT_ROUTER", "1").strip() not in {"0", "false", "False", "no", "NO"}
+ENABLE_CLOUD_FILLER = os.environ.get("ENABLE_CLOUD_FILLER", "1").strip() not in {"0", "false", "False", "no", "NO"}
 FORCE_MODE = (os.environ.get("FORCE_MODE", "") or "").strip().upper()
 
 
@@ -254,39 +255,115 @@ def _run_turn_brain(
 
     emotion_label = emotion_result.label if emotion_result is not None else None
 
-    # Build system prompt based on route
+    # Build system prompt and behavior based on route
     if route_mode == "CLOUD":
-        system = text_utils.build_cloud_system_prompt(emotion_label)
-        reply = cloud_llm.call_cloud_llm(prompt=text, system=system, timeout=20.0)
-    else:
-        # LOCAL (default) – use Ollama if enabled, otherwise just echo ASR text
-        system = text_utils.build_local_system_prompt(emotion_label)
-        reply = ""
-        if args.ollama:
-            print("Ollama (LOCAL)...", flush=True)
-            t_ollama_start = time.perf_counter()
-            reply = llm_ollama.generate_ollama(
+        # Phase 1: optional LOCAL filler via Ollama (short bridge, no answering)
+        if ENABLE_CLOUD_FILLER and args.ollama:
+            filler_system = text_utils.build_cloud_filler_system_prompt(emotion_label)
+            print("Ollama (CLOUD filler)...", flush=True)
+            t_fill_start = time.perf_counter()
+            filler_reply = llm_ollama.generate_ollama(
                 prompt=text,
                 model=args.ollama_model,
-                system=system,
+                system=filler_system,
                 url=args.ollama_url,
-                num_predict=args.ollama_num_predict,
+                num_predict=min(args.ollama_num_predict, 24),
                 temperature=args.ollama_temperature,
                 stop=["\n"],
                 keep_alive=args.ollama_keep_alive,
                 num_thread=args.ollama_num_thread,
                 num_ctx=args.ollama_num_ctx,
                 num_batch=args.ollama_num_batch,
-                max_sentences=2,
-                max_words=36,
-                timeout=20,
+                max_sentences=1,
+                max_words=24,
+                timeout=10,
             )
-            t_ollama_end = time.perf_counter()
-            print(f"[time] ollama(local): {t_ollama_end - t_ollama_start:.2f}s", flush=True)
+            t_fill_end = time.perf_counter()
+            print(f"[time] ollama(cloud-filler): {t_fill_end - t_fill_start:.2f}s", flush=True)
+            if filler_reply and not filler_reply.startswith("(Ollama error"):
+                print(f"[LLM-CLOUD-FILLER] {filler_reply}", flush=True)
+                t2b = time.perf_counter()
+                print("Synthesizing (filler)...", flush=True)
+                try:
+                    tts_audio, tts_sr = tts_kokoro.synthesize_kokoro(tts, filler_reply, voice)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[error] TTS filler failed: {exc}", file=sys.stderr)
+                else:
+                    t3 = time.perf_counter()
+                    print(f"[time] synthesize(filler): {t3 - t2b:.2f}s", flush=True)
+                    if args.trim_start > 0.0:
+                        tts_audio = audio_io.trim_start_seconds(tts_audio, tts_sr, args.trim_start)
+                    print("Playing (filler)...", flush=True)
+                    try:
+                        audio_io.play_audio(tts_audio, tts_sr, args.output_device, volume=args.volume)
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[error] playback filler failed: {exc}", file=sys.stderr)
+
+        # Phase 2: main CLOUD answer via HTTP LLM
+        system = text_utils.build_cloud_system_prompt(emotion_label)
+        reply = cloud_llm.call_cloud_llm(prompt=text, system=system, timeout=20.0)
+
+        tts_text = reply.strip() if reply and not reply.startswith("(Cloud LLM") else text
+        if reply:
+            print(f"[LLM-CLOUD] {reply}", flush=True)
+
+        t2b = time.perf_counter()
+        print("Synthesizing (cloud)...", flush=True)
+        try:
+            tts_audio, tts_sr = tts_kokoro.synthesize_kokoro(tts, tts_text, voice)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[error] TTS failed: {exc}", file=sys.stderr)
+            return
+        t3 = time.perf_counter()
+        print(f"[time] synthesize(cloud): {t3 - t2b:.2f}s", flush=True)
+        if args.trim_start > 0.0:
+            tts_audio = audio_io.trim_start_seconds(tts_audio, tts_sr, args.trim_start)
+        print("Playing (cloud)...", flush=True)
+        try:
+            audio_io.play_audio(tts_audio, tts_sr, args.output_device, volume=args.volume)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[error] playback failed: {exc}", file=sys.stderr)
+        t4 = time.perf_counter()
+        print(f"[time] play(cloud): {t4 - t3:.2f}s (total: {t4 - t0:.2f}s)", flush=True)
+        return
+
+    # LOCAL (default) – use Ollama if enabled, otherwise just echo ASR text
+    system = text_utils.build_local_system_prompt(emotion_label)
+
+    # If streaming is enabled, reuse the existing streaming path so that
+    # Ollama + Kokoro TTS run as a pipeline and the user hears output sooner.
+    if args.ollama and args.ollama_stream:
+        # Pass emotion-aware system prompt via args.ollama_system
+        args.ollama_system = system
+        _run_turn_ollama_stream(t0, args, text, tts, voice)
+        return
+
+    reply = ""
+    if args.ollama:
+        print("Ollama (LOCAL)...", flush=True)
+        t_ollama_start = time.perf_counter()
+        reply = llm_ollama.generate_ollama(
+            prompt=text,
+            model=args.ollama_model,
+            system=system,
+            url=args.ollama_url,
+            num_predict=args.ollama_num_predict,
+            temperature=args.ollama_temperature,
+            stop=["\n"],
+            keep_alive=args.ollama_keep_alive,
+            num_thread=args.ollama_num_thread,
+            num_ctx=args.ollama_num_ctx,
+            num_batch=args.ollama_num_batch,
+            max_sentences=2,
+            max_words=36,
+            timeout=20,
+        )
+        t_ollama_end = time.perf_counter()
+        print(f"[time] ollama(local): {t_ollama_end - t_ollama_start:.2f}s", flush=True)
 
     tts_text = reply.strip() if reply and not reply.startswith("(") else text
     if reply:
-        print(f"[LLM-{route_mode}] {reply}", flush=True)
+        print(f"[LLM-LOCAL] {reply}", flush=True)
 
     t2b = time.perf_counter()
     print("Synthesizing...", flush=True)
