@@ -71,6 +71,12 @@ ESPEAK_DATA_ARCHIVE_URL = (
 )
 ESPEAK_DATA_ARCHIVE_NAME = "espeak-ng-data.tar.bz2"
 
+# VAD: silero-vad ONNX model for speech activity detection.
+SILERO_VAD_URL = (
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+    "silero_vad.onnx"
+)
+
 
 def _download_file(url: str, dst: Path, desc: str) -> None:
     """Stream download a file to dst."""
@@ -262,6 +268,27 @@ def _ensure_sherpa_tts(root: Path) -> bool:
     return True
 
 
+def _ensure_sherpa_vad(root: Path) -> bool:
+    """Download silero_vad.onnx for sherpa-onnx VAD into sherpa_vad/.
+
+    Returns True if ready, False on failure (but does not raise).
+    """
+    vad_dir = root / "sherpa_vad"
+    vad_model = vad_dir / "silero_vad.onnx"
+
+    if vad_model.exists():
+        print(f"[info] silero_vad.onnx already present at {vad_model}")
+        return True
+
+    try:
+        _download_file(SILERO_VAD_URL, vad_model, "silero_vad.onnx (VAD)")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[error] Failed to download silero_vad.onnx: {exc}", file=sys.stderr)
+        return False
+
+    return True
+
+
 def main() -> int:
     root = Path(__file__).resolve().parent
 
@@ -352,6 +379,9 @@ def main() -> int:
     # sherpa-onnx TTS assets (English VITS LJSpeech, via vits-coqui-en-ljspeech)
     sherpa_tts_ready = _ensure_sherpa_tts(root)
 
+    # sherpa-onnx VAD (silero-vad ONNX) for always-listening mode
+    sherpa_vad_ready = _ensure_sherpa_vad(root)
+
     # Final status summary (best-effort)
     try:
         emo_size = target_onnx.stat().st_size if target_onnx.exists() else 0
@@ -364,6 +394,8 @@ def main() -> int:
             print(f"[summary] sherpa-onnx STT: {root / 'sherpa_stt'}")
         if sherpa_tts_ready:
             print(f"[summary] sherpa-onnx TTS: {root / 'sherpa_tts'}")
+        if sherpa_vad_ready:
+            print(f"[summary] sherpa-onnx VAD: {root / 'sherpa_vad' / 'silero_vad.onnx'}")
     except OSError:
         pass
 

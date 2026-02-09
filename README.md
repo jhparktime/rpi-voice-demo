@@ -3,45 +3,78 @@ rpi-voice-demo
 
 ## Overview
 
-Voice demo for Raspberry Pi (single-mode sherpa-onnx):
+Voice demo for Raspberry Pi — sherpa-onnx based STT/TTS with emotion-aware
+intent routing and natural conversation flow:
 
-- STT: sherpa-onnx streaming Zipformer (low-latency)
-- Emotion: ONNX BERT classifier (GoEmotions-style, optional)
-- Intent: simple LOCAL vs CLOUD routing based on sentence embeddings
-- LOCAL LLM: Ollama (e.g. `smollm2:360m`) on the Pi
-- CLOUD LLM: external HTTP API hook (optional)
--- TTS: sherpa-onnx VITS (LJ Speech, single-speaker)
+- **STT**: sherpa-onnx streaming Zipformer (OnlineRecognizer, 3 modes)
+  - `--streaming` (default): Enter → mic stream → endpoint auto-detection → text
+  - `--no-streaming`: Enter → fixed N-second recording → chunked transcription
+  - `--vad`: always-listening — silero-vad detects speech automatically, no Enter needed
+- **Emotion**: ONNX BERT classifier (GoEmotions-style, optional)
+- **Intent**: LOCAL vs CLOUD routing based on sentence embeddings
+- **LOCAL LLM**: Ollama (e.g. `smollm2:360m`) on the Pi — empathic filler + response
+- **CLOUD LLM**: external HTTP API hook (optional) — sLLM provides semantic filler during CLOUD latency
+- **TTS**: sherpa-onnx VITS (LJ Speech, single-speaker)
 
-Run from the directory that contains the `Demo/` package:
+The sLLM (local Ollama) provides **semantic fillers** ("Let me look that up…")
+during CLOUD LLM latency, so the conversation feels natural even when the main
+answer takes a few seconds.
+
+## Quick start
 
 ```bash
+# 1. Set up venv and install deps (on RPi)
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+
+# 2. Download all models (emotion, STT, TTS, VAD)
+python download_model.py
+
+# 3. Run the demo (default: streaming mode with endpoint detection)
 python -m Demo
+
+# 4. With Ollama LLM enabled
+ollama serve &
+python -m Demo --ollama --ollama-model smollm2:360m
+
+# 5. Streaming mode (default — press Enter, speak, endpoint auto-detects end)
+python -m Demo --streaming
+
+# 6. VAD always-listening mode (no Enter needed, just speak)
+python -m Demo --vad
+
+# 7. Fixed-duration fallback (3 seconds)
+python -m Demo --no-streaming --record-seconds 3
 ```
 
-Examples:
+## STT modes
 
-```bash
-# Single-mode sherpa-onnx STT/TTS + brain
-python -m Demo
-```
+| Flag | Trigger | Description |
+|------|---------|-------------|
+| `--streaming` (default) | Enter key | Opens mic, streams to OnlineRecognizer, endpoint detection auto-stops |
+| `--no-streaming` | Enter key | Records for `--record-seconds`, then feeds entire buffer in chunks |
+| `--vad` | Automatic | Always-listening: silero-vad detects speech start/end, no Enter needed |
+
+Common options:
+- `--max-listen-seconds 15` — timeout for streaming/VAD modes (default 15s)
+- `--record-seconds 3` — duration for `--no-streaming` mode (default 3s)
 
 ## Environment flags (RPi)
-
-These flags let you gradually enable features on the Pi:
 
 - `ENABLE_EMOTION` (default: `1`)
   - `1` / `true` / `yes`: run emotion classifier and inject an `EmotionHint` into system prompts
   - `0` / `false` / `no`: skip emotion (no extra latency, no hint)
 
 - `ENABLE_INTENT_ROUTER` (default: `1`)
-  - `1`: use a simple intent classifier to route between LOCAL and CLOUD
+  - `1`: use intent classifier to route between LOCAL and CLOUD
   - `0`: always treat as `LOCAL` (unless `FORCE_MODE` overrides)
+
+- `ENABLE_CLOUD_FILLER` (default: `1`)
+  - `1`: for CLOUD requests, sLLM generates a quick spoken filler first
+  - `0`: skip filler, wait silently for CLOUD response
 
 - `FORCE_MODE`
   - Set to `LOCAL` or `CLOUD` to override routing for all turns.
-  - Example:
-    - `FORCE_MODE=LOCAL` → always use Ollama/local prompt
-    - `FORCE_MODE=CLOUD` → always use CLOUD HTTP LLM (if configured)
 
 ## LOCAL LLM (Ollama) setup
 
@@ -63,81 +96,50 @@ source venv/bin/activate
 python -m Demo --ollama --ollama-model smollm2:360m
 ```
 
-(`--ollama-url`, `--ollama-num-thread` 등은 `Demo/stt_tts_cli.py` 옵션으로 조정 가능)
-
 ## CLOUD LLM HTTP hook
 
-To enable CLOUD mode, configure these env vars:
+- `CLOUD_LLM_URL` (required) — Base URL for your HTTP LLM endpoint.
+  POSTs JSON: `{ "prompt": "<user text>", "system": "<system prompt>" }`
+- `CLOUD_LLM_API_KEY` (optional) — sent as `Authorization: Bearer <API_KEY>`.
 
-- `CLOUD_LLM_URL` (required)
-  - Base URL for your HTTP LLM endpoint.
-  - The demo POSTs JSON:
-    - `{ "prompt": "<user text>", "system": "<system prompt>" }`
+## Model files
 
-- `CLOUD_LLM_API_KEY` (optional)
-  - If set, sent as `Authorization: Bearer <API_KEY>`.
+All models are **not stored in git**. Run `python download_model.py` to download:
 
-If `CLOUD_LLM_URL` is not set, CLOUD routing will return a short error string and effectively fall back to LOCAL behavior from the user's perspective (since TTS will read the ASR text instead).
-
-## Emotion model files
-
-The ONNX BERT emotion classifier expects files under:
-
-- `emotion_onnx_int8/`
-
-This directory is **not stored in git** to keep the repo lightweight.  
-On the Raspberry Pi, you can create it with a one-time download script:
-
-```bash
-source venv/bin/activate
-python download_model.py
+### Emotion classifier
 ```
-
-This will download:
-
-- `config.json`, tokenizer files, vocab from `joeddav/distilbert-base-uncased-go-emotions-student`
-- `onnx/model_quantized.onnx` from `Cohee/distilbert-base-uncased-go-emotions-onnx`
-
-and place them into:
-
-```text
 emotion_onnx_int8/
-  config.json
-  tokenizer.json
-  tokenizer_config.json
-  special_tokens_map.json
-  vocab.txt
-  onnx/
-    model_quantized.onnx
+  config.json, tokenizer_config.json, special_tokens_map.json, vocab.txt
+  onnx/model_quantized.onnx
 ```
 
-The first run requires network access to HuggingFace; after that, the directory can be reused offline.
+### sherpa-onnx STT (streaming Zipformer, ~20M params)
+```
+sherpa_stt/
+  tokens.txt, encoder.onnx, decoder.onnx, joiner.onnx
+```
 
-## sherpa-onnx STT/TTS model files
+### sherpa-onnx TTS (VITS LJ Speech)
+```
+sherpa_tts/
+  model.onnx, tokens.txt, espeak-ng-data/
+```
 
-For the baseline mode, we use sherpa-onnx for both STT and TTS.
+### sherpa-onnx VAD (silero-vad)
+```
+sherpa_vad/
+  silero_vad.onnx
+```
 
-- `Demo/stt_sherpa.py` expects an English streaming STT model under:
+## Architecture
 
-  ```text
-  sherpa_stt/
-    tokens.txt
-    encoder.onnx
-    decoder.onnx
-    joiner.onnx
-  ```
-
-- `Demo/tts_sherpa.py` expects an English VITS TTS model under:
-
-  ```text
-  sherpa_tts/
-    model.onnx
-    tokens.txt
-    espeak-ng-data/
-  ```
-
-These files are **not stored in git**.  
-`download_model.py` will automatically download and prepare:
-
-- A small English streaming STT model (Zipformer, ~20M params) into `sherpa_stt/`
-- An English VITS TTS model (vits-coqui-en-ljspeech + espeak-ng-data) into `sherpa_tts/`
+```
+Mic → [VAD] → OnlineRecognizer (streaming STT) → text
+                                                    ↓
+                                         Emotion + Intent Router
+                                           ↓               ↓
+                                        LOCAL            CLOUD
+                                     (Ollama sLLM)    (sLLM filler → HTTP LLM)
+                                           ↓               ↓
+                                    sherpa-onnx VITS TTS → Speaker
+```

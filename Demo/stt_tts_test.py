@@ -1,8 +1,16 @@
 """
 Sherpa-onnx STT -> Emotion + Intent routing -> LOCAL/CLOUD LLM -> sherpa-onnx VITS TTS demo (RPi).
 
+STT modes (controlled by CLI flags):
+  --streaming       (default) Stream mic to OnlineRecognizer with endpoint detection; Enter to start.
+  --no-streaming    Fixed-duration recording + chunked transcription (Phase 1 fallback).
+  --vad             Always-listening: VAD detects speech automatically, no Enter needed.
+
 LOCAL: Ollama (e.g., smollm2:360m) with empathic prompt.
 CLOUD: external HTTP LLM (if configured) with informational prompt.
+
+The sLLM provides semantic fillers during CLOUD LLM latency so the conversation
+feels natural even when the main answer takes a few seconds.
 """
 from __future__ import annotations
 
@@ -34,9 +42,10 @@ ENABLE_INTENT_ROUTER = os.environ.get("ENABLE_INTENT_ROUTER", "1").strip() not i
 ENABLE_CLOUD_FILLER = os.environ.get("ENABLE_CLOUD_FILLER", "1").strip() not in {"0", "false", "False", "no", "NO"}
 FORCE_MODE = (os.environ.get("FORCE_MODE", "") or "").strip().upper()
 
-# Warn when STT transcribe time exceeds this (seconds); suggests CPU/thermal/memory check on RPi.
 SLOW_ASR_WARN_THRESHOLD = 10.0
 
+
+# ── TTS helper ─────────────────────────────────────────────────────────────
 
 def _synthesize_tts(tts: Any, voice: str, text: str, speed: float = 1.0) -> Tuple[np.ndarray, int]:
     """TTS helper: always use sherpa-onnx OfflineTts backend (tts/voice are unused)."""
@@ -46,16 +55,18 @@ def _synthesize_tts(tts: Any, voice: str, text: str, speed: float = 1.0) -> Tupl
     return audio, sr
 
 
+# ── Turn handlers (ONNX LLM, Ollama stream, Ollama single, Brain router) ──
+
 def _run_turn_onnx_llm(
     t0: float,
     args: Any,
     text: str,
-    tts: Kokoro,
+    tts: Any,
     voice: str,
     onnx_model: Any,
     onnx_tokenizer: Any,
 ) -> None:
-    """ONNX LLM -> synthesize -> play. Logs timing."""
+    """ONNX LLM -> synthesize -> play."""
     print("ONNX LLM...", flush=True)
     t_llm_start = time.perf_counter()
     reply = llm_onnx.generate_onnx_llm(
@@ -95,8 +106,8 @@ def _run_turn_onnx_llm(
     print(f"[time] play: {t4 - t3:.2f}s (total: {t4 - t0:.2f}s)", flush=True)
 
 
-def _run_turn_ollama_stream(t0: float, args: Any, text: str, tts: Kokoro, voice: str) -> None:
-    """Ollama stream (async or sync) -> TTS per chunk. Logs timing."""
+def _run_turn_ollama_stream(t0: float, args: Any, text: str, tts: Any, voice: str) -> None:
+    """Ollama stream (async or sync) -> TTS per chunk."""
     print("Ollama (stream)...", flush=True)
     t_ollama_start = time.perf_counter()
     first_play_ts: List[float] = []
@@ -155,8 +166,8 @@ def _run_turn_ollama_stream(t0: float, args: Any, text: str, tts: Kokoro, voice:
     print(f"[time] total: {t_ollama_end - t0:.2f}s", flush=True)
 
 
-def _run_turn_ollama_or_direct(t0: float, args: Any, text: str, tts: Kokoro, voice: str) -> None:
-    """Ollama single reply -> synthesize -> play, or direct TTS. Logs timing."""
+def _run_turn_ollama_or_direct(t0: float, args: Any, text: str, tts: Any, voice: str) -> None:
+    """Ollama single reply -> synthesize -> play, or direct TTS."""
     if args.ollama:
         print("Ollama...", flush=True)
         t_ollama_start = time.perf_counter()
@@ -204,19 +215,33 @@ def _run_turn_ollama_or_direct(t0: float, args: Any, text: str, tts: Kokoro, voi
     print(f"[time] play: {t4 - t3:.2f}s (total: {t4 - t0:.2f}s)", flush=True)
 
 
+# ── Brain: Emotion + Intent routing → LOCAL / CLOUD LLM → TTS ─────────────
+
 def _run_turn_brain(
     t0: float,
     args: Any,
     text: str,
-    tts: Kokoro,
+    tts: Any,
     voice: str,
     emotion_classifier: Optional[EmotionClassifierONNX],
-) -> None:
-    """Route using emotion + intent, call LOCAL or CLOUD LLM, then TTS."""
+    conversation: Optional[text_utils.ConversationBuffer] = None,
+) -> Optional[str]:
+    """Route using emotion + intent, call LOCAL or CLOUD LLM, then TTS.
+
+    For CLOUD requests the sLLM first generates a quick semantic filler
+    ("Let me look that up…") so the user hears something immediately while
+    the heavier CLOUD model is processing.
+
+    Returns the assistant reply text (or None if no LLM reply was generated).
+    """
     route_mode = "LOCAL"
     emotion_result: Optional[EmotionResult] = None
 
-    # Respect FORCE_MODE override first
+    # Build context-enriched prompt for LLM (multi-turn history)
+    llm_prompt = text
+    if conversation is not None and len(conversation) > 0:
+        llm_prompt = conversation.format_prompt_with_context(text)
+
     if FORCE_MODE in {"LOCAL", "CLOUD"}:
         route_mode = FORCE_MODE
         if ENABLE_EMOTION and emotion_classifier and emotion_classifier.available:
@@ -226,7 +251,6 @@ def _run_turn_brain(
                 print(f"[Emotion] error: {exc}", file=sys.stderr)
                 emotion_result = None
     else:
-        # Optionally run emotion + intent in parallel
         def _run_emotion() -> Optional[EmotionResult]:
             if not (ENABLE_EMOTION and emotion_classifier and emotion_classifier.available):
                 return None
@@ -239,7 +263,6 @@ def _run_turn_brain(
         def _run_intent() -> str:
             if not ENABLE_INTENT_ROUTER:
                 return "LOCAL"
-            # Prefer anchors-based router; fall back to simple classifier on error.
             try:
                 rr = router_anchors_runtime.route_local_or_cloud(text)
                 print(
@@ -264,10 +287,11 @@ def _run_turn_brain(
             route_mode = fut_intent.result()
 
     emotion_label = emotion_result.label if emotion_result is not None else None
+    assistant_reply: Optional[str] = None
 
-    # Build system prompt and behavior based on route
+    # ── CLOUD path ──────────────────────────────────────────────────────
     if route_mode == "CLOUD":
-        # Phase 1: optional LOCAL filler via Ollama (short bridge, no answering)
+        # Phase 1: sLLM semantic filler (bridge while CLOUD LLM processes)
         if ENABLE_CLOUD_FILLER and args.ollama:
             filler_system = text_utils.build_cloud_filler_system_prompt(emotion_label)
             print("Ollama (CLOUD filler)...", flush=True)
@@ -311,11 +335,12 @@ def _run_turn_brain(
 
         # Phase 2: main CLOUD answer via HTTP LLM
         system = text_utils.build_cloud_system_prompt(emotion_label)
-        reply = cloud_llm.call_cloud_llm(prompt=text, system=system, timeout=20.0)
+        reply = cloud_llm.call_cloud_llm(prompt=llm_prompt, system=system, timeout=20.0)
 
         tts_text = reply.strip() if reply and not reply.startswith("(Cloud LLM") else text
         if reply:
             print(f"[LLM-CLOUD] {reply}", flush=True)
+        assistant_reply = tts_text
 
         t2b = time.perf_counter()
         print("Synthesizing (cloud)...", flush=True)
@@ -323,7 +348,7 @@ def _run_turn_brain(
             tts_audio, tts_sr = _synthesize_tts(tts, voice, tts_text)
         except Exception as exc:  # noqa: BLE001
             print(f"[error] TTS failed: {exc}", file=sys.stderr)
-            return
+            return assistant_reply
         t3 = time.perf_counter()
         print(f"[time] synthesize(cloud): {t3 - t2b:.2f}s", flush=True)
         if args.trim_start > 0.0:
@@ -335,25 +360,23 @@ def _run_turn_brain(
             print(f"[error] playback failed: {exc}", file=sys.stderr)
         t4 = time.perf_counter()
         print(f"[time] play(cloud): {t4 - t3:.2f}s (total: {t4 - t0:.2f}s)", flush=True)
-        return
+        return assistant_reply
 
-    # LOCAL (default) – use Ollama if enabled, otherwise just echo ASR text
+    # ── LOCAL path ──────────────────────────────────────────────────────
     system = text_utils.build_local_system_prompt(emotion_label)
 
-    # If streaming is enabled, reuse the existing streaming path so that
-    # Ollama + Kokoro TTS run as a pipeline and the user hears output sooner.
     if args.ollama and args.ollama_stream:
-        # Pass emotion-aware system prompt via args.ollama_system
         args.ollama_system = system
-        _run_turn_ollama_stream(t0, args, text, tts, voice)
-        return
+        _run_turn_ollama_stream(t0, args, llm_prompt, tts, voice)
+        # Streaming reply is logged but not easily captured; return None for now.
+        return None
 
     reply = ""
     if args.ollama:
         print("Ollama (LOCAL)...", flush=True)
         t_ollama_start = time.perf_counter()
         reply = llm_ollama.generate_ollama(
-            prompt=text,
+            prompt=llm_prompt,
             model=args.ollama_model,
             system=system,
             url=args.ollama_url,
@@ -374,6 +397,7 @@ def _run_turn_brain(
     tts_text = reply.strip() if reply and not reply.startswith("(") else text
     if reply:
         print(f"[LLM-LOCAL] {reply}", flush=True)
+    assistant_reply = tts_text
 
     t2b = time.perf_counter()
     print("Synthesizing...", flush=True)
@@ -381,7 +405,7 @@ def _run_turn_brain(
         tts_audio, tts_sr = _synthesize_tts(tts, voice, tts_text)
     except Exception as exc:  # noqa: BLE001
         print(f"[error] TTS failed: {exc}", file=sys.stderr)
-        return
+        return assistant_reply
     t3 = time.perf_counter()
     print(f"[time] synthesize: {t3 - t2b:.2f}s", flush=True)
     if args.trim_start > 0.0:
@@ -393,7 +417,35 @@ def _run_turn_brain(
         print(f"[error] playback failed: {exc}", file=sys.stderr)
     t4 = time.perf_counter()
     print(f"[time] play: {t4 - t3:.2f}s (total: {t4 - t0:.2f}s)", flush=True)
+    return assistant_reply
 
+
+# ── Warmup helpers ─────────────────────────────────────────────────────────
+
+def _warmup(args: Any, emotion_classifier: Optional[EmotionClassifierONNX]) -> None:
+    """Best-effort warm-up of embedder, emotion, cloud LLM, and STT recognizer."""
+    try:
+        if ENABLE_INTENT_ROUTER:
+            _ = router_anchors_runtime.route_local_or_cloud("Warmup for routing.")
+        if ENABLE_EMOTION and emotion_classifier is not None and emotion_classifier.available:
+            _ = emotion_classifier.predict("Hello, just warming up.")
+        cloud_url = (os.environ.get("CLOUD_LLM_URL") or "").strip()
+        if cloud_url:
+            _ = cloud_llm.call_cloud_llm(
+                prompt="Warmup request.",
+                system="You are a friendly, reliable assistant. This is a warmup call; a short reply is fine.",
+                timeout=5.0,
+            )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[Warmup] warning: {exc}", file=sys.stderr)
+
+    # Pre-initialize STT recognizer so the first turn isn't slow.
+    stt_sherpa.get_recognizer()
+    if args.vad:
+        stt_sherpa.get_vad()
+
+
+# ── Main entry point ───────────────────────────────────────────────────────
 
 def main(argv: Optional[Iterable[str]] = None) -> int:
     args = stt_tts_cli.parse_args(argv)
@@ -404,19 +456,34 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         print("[error] --trim-start must be >= 0.", file=sys.stderr)
         return 1
 
-    # sherpa-onnx TTS backend (OfflineTts) is configured in Demo/tts_sherpa.py
-    # and download_model.py, so we don't need to load a separate TTS model here.
     tts = None
     voice = "sherpa_default"
 
-    print("Voice demo (sherpa-onnx single mode)")
-    print("- ASR: sherpa-onnx (streaming Zipformer)")
+    # ── Determine STT mode ──
+    if args.vad:
+        stt_mode = "vad"
+    elif args.streaming:
+        stt_mode = "streaming"
+    else:
+        stt_mode = "fixed"
+
+    stt_mode_label = {
+        "vad": "VAD always-listening + streaming OnlineRecognizer",
+        "streaming": "streaming OnlineRecognizer with endpoint detection (Enter to start)",
+        "fixed": f"fixed {args.record_seconds}s recording + chunked transcription",
+    }
+
+    print("Voice demo (sherpa-onnx)")
+    print(f"- STT: {stt_mode_label[stt_mode]}")
     print("- TTS: sherpa-onnx VITS (vits-coqui-en-ljspeech)")
     print(f"- volume: {args.volume}")
     print(f"- trim-start: {args.trim_start}s")
-    print(f"- record seconds: {args.record_seconds}")
+    if stt_mode != "fixed":
+        print(f"- max-listen-seconds: {args.max_listen_seconds}")
+    else:
+        print(f"- record seconds: {args.record_seconds}")
 
-    # LOCAL LLM (Ollama) warmup if enabled
+    # LOCAL LLM (Ollama) warmup
     if args.ollama:
         print(f"- ollama: {args.ollama_model} @ {args.ollama_url}")
         print(f"- ollama-stream: {args.ollama_stream} (async: {args.ollama_stream_async}, max-words/chunk: {args.ollama_stream_max_words})")
@@ -442,9 +509,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             print(f"[warn] Ollama preload failed: {e}", file=sys.stderr)
 
     stt_tts_cli.print_config(args, voice)
-    print("Press Enter to record, or Ctrl+C to quit.")
 
-    # Emotion classifier (ONNX BERT) – optional, controlled by ENABLE_EMOTION
+    # Emotion classifier
     emotion_classifier: Optional[EmotionClassifierONNX] = None
     if ENABLE_EMOTION:
         model_dir = Path(__file__).resolve().parent.parent / "emotion_onnx_int8"
@@ -452,26 +518,121 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         if not getattr(emotion_classifier, "available", False):
             emotion_classifier = None
 
-    # --- Warm-up phase: embedder / emotion / cloud LLM ---
-    # This increases startup time a bit but avoids first-turn spikes.
-    try:
-        if ENABLE_INTENT_ROUTER:
-            # Warm up anchors-based router (loads SentenceTransformer + anchor embeddings).
-            _ = router_anchors_runtime.route_local_or_cloud("Warmup for routing.")
-        if ENABLE_EMOTION and emotion_classifier is not None and emotion_classifier.available:
-            # Warm up emotion classifier ONNX + tokenizer.
-            _ = emotion_classifier.predict("Hello, just warming up.")
-        cloud_url = (os.environ.get("CLOUD_LLM_URL") or "").strip()
-        if cloud_url:
-            # Best-effort CLOUD LLM warm-up; ignore errors so LOCAL path still works.
-            _ = cloud_llm.call_cloud_llm(
-                prompt="Warmup request.",
-                system="You are a friendly, reliable assistant. This is a warmup call; a short reply is fine.",
-                timeout=5.0,
-            )
-    except Exception as exc:  # noqa: BLE001
-        print(f"[Warmup] warning: {exc}", file=sys.stderr)
+    # Multi-turn conversation buffer
+    conversation: Optional[text_utils.ConversationBuffer] = None
+    if args.max_turns > 0:
+        conversation = text_utils.ConversationBuffer(max_turns=args.max_turns)
+        print(f"- multi-turn context: last {args.max_turns} turns")
 
+    # Warm-up
+    _warmup(args, emotion_classifier)
+
+    if stt_mode == "vad":
+        print("Always-listening mode (VAD). Say something — no Enter needed. Ctrl+C to quit.")
+    else:
+        print("Press Enter to record, or Ctrl+C to quit.")
+
+    # ── Main loop ──────────────────────────────────────────────────────
+    if stt_mode == "vad":
+        _main_loop_vad(args, tts, voice, emotion_classifier, conversation)
+    elif stt_mode == "streaming":
+        _main_loop_streaming(args, tts, voice, emotion_classifier, conversation)
+    else:
+        _main_loop_fixed(args, tts, voice, emotion_classifier, conversation)
+
+    return 0
+
+
+# ── Loop: VAD always-listening (Phase 3) ──────────────────────────────────
+
+def _main_loop_vad(
+    args: Any,
+    tts: Any,
+    voice: str,
+    emotion_classifier: Optional[EmotionClassifierONNX],
+    conversation: Optional[text_utils.ConversationBuffer] = None,
+) -> None:
+    """Always-listening loop using VAD + streaming OnlineRecognizer."""
+    while True:
+        try:
+            t0 = time.perf_counter()
+            text, elapsed = stt_sherpa.vad_stream_recognize_one(
+                input_device=args.input_device,
+                max_seconds=args.max_listen_seconds,
+            )
+        except KeyboardInterrupt:
+            print("\nBye.")
+            break
+        except Exception as exc:  # noqa: BLE001
+            print(f"[error] VAD recognition failed: {exc}", file=sys.stderr)
+            continue
+
+        print(f"[time] stt(vad): {elapsed:.2f}s", flush=True)
+
+        if not text:
+            print("[info] no speech detected.")
+            continue
+
+        print(f"[ASR] {text}")
+        reply = _run_turn_brain(t0, args, text, tts, voice, emotion_classifier, conversation)
+        if conversation is not None and reply:
+            conversation.add_turn(text, reply)
+        print("Done.", flush=True)
+        gc.collect()
+
+
+# ── Loop: streaming mic + endpoint detection (Phase 2) ────────────────────
+
+def _main_loop_streaming(
+    args: Any,
+    tts: Any,
+    voice: str,
+    emotion_classifier: Optional[EmotionClassifierONNX],
+    conversation: Optional[text_utils.ConversationBuffer] = None,
+) -> None:
+    """Enter-triggered loop with streaming OnlineRecognizer + endpoint detection."""
+    while True:
+        try:
+            input(">>> ")
+        except KeyboardInterrupt:
+            print("\nBye.")
+            break
+
+        t0 = time.perf_counter()
+
+        try:
+            text, elapsed = stt_sherpa.stream_recognize_until_endpoint(
+                input_device=args.input_device,
+                max_seconds=args.max_listen_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[error] streaming recognition failed: {exc}", file=sys.stderr)
+            continue
+
+        print(f"[time] stt(streaming): {elapsed:.2f}s", flush=True)
+
+        if not text:
+            print("[info] no speech detected / empty text.")
+            continue
+
+        print(f"[ASR] {text}")
+        reply = _run_turn_brain(t0, args, text, tts, voice, emotion_classifier, conversation)
+        if conversation is not None and reply:
+            conversation.add_turn(text, reply)
+        print("Done. Press Enter to record again.", flush=True)
+        gc.collect()
+
+
+# ── Loop: fixed-duration recording (Phase 1 fallback) ─────────────────────
+
+def _main_loop_fixed(
+    args: Any,
+    tts: Any,
+    voice: str,
+    emotion_classifier: Optional[EmotionClassifierONNX],
+    conversation: Optional[text_utils.ConversationBuffer] = None,
+) -> None:
+    """Enter-triggered loop with fixed-duration recording + chunked transcription."""
     while True:
         try:
             input(">>> ")
@@ -514,13 +675,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             continue
 
         print(f"[ASR] {text}")
-
-        _run_turn_brain(t0, args, text, tts, voice, emotion_classifier)
-
+        reply = _run_turn_brain(t0, args, text, tts, voice, emotion_classifier, conversation)
+        if conversation is not None and reply:
+            conversation.add_turn(text, reply)
         print("Done. Press Enter to record again.", flush=True)
         gc.collect()
-
-    return 0
 
 
 if __name__ == "__main__":

@@ -10,13 +10,37 @@ from typing import Any, Iterable, Optional
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="sherpa-onnx STT/TTS voice demo (Raspberry Pi)")
     default_root = Path(__file__).resolve().parent.parent
-    parser.add_argument("--record-seconds", type=float, default=3.0, help="Record duration per turn (seconds).")
+
+    # --- Recording & I/O ---
+    parser.add_argument("--record-seconds", type=float, default=3.0, help="Record duration per turn when --no-streaming (seconds).")
     parser.add_argument("--input-device", type=int, default=None, help="sounddevice input device index (None=default).")
     parser.add_argument("--output-device", type=int, default=None, help="sounddevice output device index (None=default).")
-    # sherpa-onnx STT/TTS does not require explicit model paths here; they are
-    # controlled by download_model.py and environment variables.
     parser.add_argument("--volume", type=float, default=1.0, help="Playback volume 0.0–1.0 (default 1.0).")
     parser.add_argument("--trim-start", type=float, default=0.0, help="Trim this many seconds from start of TTS audio (default 0).")
+
+    # --- STT mode selection ---
+    parser.add_argument(
+        "--streaming", action="store_true", default=True,
+        help="(Default) Stream mic to OnlineRecognizer with endpoint detection.",
+    )
+    parser.add_argument(
+        "--no-streaming", action="store_false", dest="streaming",
+        help="Fixed-duration recording + chunked transcription (Phase 1 fallback).",
+    )
+    parser.add_argument(
+        "--max-listen-seconds", type=float, default=15.0,
+        help="Max seconds to listen in streaming/VAD mode before timeout (default 15).",
+    )
+    parser.add_argument(
+        "--vad", action="store_true", default=False,
+        help="Always-listening mode: VAD detects speech automatically (no Enter needed).",
+    )
+    parser.add_argument(
+        "--max-turns", type=int, default=5,
+        help="Number of conversation turns to remember for multi-turn context (default 5, 0 to disable).",
+    )
+
+    # --- Ollama (LOCAL LLM) ---
     parser.add_argument("--ollama", action="store_true", help="Send STT text to Ollama and TTS the reply (voice chatbot).")
     parser.add_argument("--ollama-url", type=str, default="http://localhost:11434/api/generate", help="Ollama API URL.")
     parser.add_argument("--ollama-model", type=str, default="smollm2:360m", help="Ollama model name.")
@@ -32,10 +56,13 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument("--ollama-stream-max-words", type=int, default=12, help="Max words per chunk when no sentence end (stream mode).")
     parser.add_argument("--ollama-stream-async", action="store_true", default=True, help="Overlap synth and play for seamless TTS (default).")
     parser.add_argument("--no-ollama-stream-async", action="store_false", dest="ollama_stream_async", help="Stream TTS sequential (synth then play per chunk).")
+
+    # --- ONNX LLM ---
     parser.add_argument("--onnx-llm", action="store_true", help="Use ONNX LLM instead of Ollama (e.g. SmolLM2-135M-Instruct); no streaming, single TTS.")
     parser.add_argument("--onnx-model", type=str, default="HuggingFaceTB/SmolLM2-135M-Instruct", help="Hugging Face model id for ONNX LLM (must have onnx/ subfolder).")
     parser.add_argument("--onnx-max-new-tokens", type=int, default=24, help="ONNX LLM max new tokens.")
     parser.add_argument("--onnx-temperature", type=float, default=0.3, help="ONNX LLM temperature.")
+
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
@@ -50,6 +77,10 @@ def print_config(args: argparse.Namespace, voice: str) -> None:
     d: dict[str, Any] = {}
     for key in [
         "record_seconds",
+        "streaming",
+        "vad",
+        "max_listen_seconds",
+        "max_turns",
         "input_device",
         "output_device",
         "volume",
@@ -67,6 +98,6 @@ def print_config(args: argparse.Namespace, voice: str) -> None:
     ]:
         if hasattr(args, key):
             d[key] = _arg_to_json_value(getattr(args, key))
-    d["voice"] = voice  # resolved voice (kept for backward compatibility)
+    d["voice"] = voice
     print("--- config ---")
     print(json.dumps(d, indent=2))

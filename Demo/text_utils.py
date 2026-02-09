@@ -1,8 +1,8 @@
-"""Text postprocessing and LLM prompt constants."""
+"""Text postprocessing, LLM prompt constants, and conversation history."""
 from __future__ import annotations
 
 import re
-from typing import Tuple
+from typing import List, Tuple
 
 
 def _limit_words(s: str, max_words: int) -> Tuple[str, bool]:
@@ -108,4 +108,47 @@ def build_cloud_filler_system_prompt(emotion_label: str | None) -> str:
         "Sound casual and warm, not formal; no emojis, no lists, no technical details."
         f"{emo_hint}"
     )
+
+
+# ── Conversation history buffer ───────────────────────────────────────────
+
+
+class ConversationBuffer:
+    """Ring buffer that stores the last N conversation turns for multi-turn context.
+
+    Each turn is a (user_text, assistant_reply) pair.
+    When building the LLM prompt, the history is prepended so the model can
+    maintain conversational coherence across turns.
+    """
+
+    def __init__(self, max_turns: int = 5) -> None:
+        self.max_turns = max_turns
+        self.turns: List[Tuple[str, str]] = []
+
+    def add_turn(self, user_text: str, assistant_reply: str) -> None:
+        """Record a completed conversation turn."""
+        self.turns.append((user_text, assistant_reply))
+        if len(self.turns) > self.max_turns:
+            self.turns = self.turns[-self.max_turns:]
+
+    def format_prompt_with_context(self, current_user_text: str) -> str:
+        """Build a prompt string that includes prior conversation context.
+
+        If there is no history, returns the current text as-is.
+        """
+        if not self.turns:
+            return current_user_text
+
+        parts: List[str] = []
+        for user, assistant in self.turns:
+            parts.append(f"User: {user}")
+            parts.append(f"Assistant: {assistant}")
+        parts.append(f"User: {current_user_text}")
+        return "\n".join(parts)
+
+    def clear(self) -> None:
+        self.turns.clear()
+
+    def __len__(self) -> int:
+        return len(self.turns)
 

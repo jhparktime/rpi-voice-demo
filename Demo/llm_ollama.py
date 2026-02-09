@@ -7,17 +7,14 @@ import re
 import sys
 import threading
 import time
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import numpy as np
 import requests
 
 from . import audio_io
 from . import text_utils
-from . import tts_kokoro
-
-if TYPE_CHECKING:
-    from kokoro_onnx import Kokoro
+from . import tts_sherpa
 
 
 def generate_ollama(
@@ -118,7 +115,7 @@ def stream_ollama_tts_chunks(
     temperature: float,
     stop: List[str],
     max_words_per_chunk: int,
-    tts: "Kokoro",
+    tts: Any,
     voice: str,
     output_device: Optional[int],
     volume: float,
@@ -173,7 +170,7 @@ def stream_ollama_tts_chunks(
                         break
                     buffer = remainder
                     try:
-                        tts_audio, tts_sr = tts_kokoro.synthesize_kokoro(tts, to_speak, voice)
+                        tts_audio, tts_sr = tts_sherpa.synthesize_sherpa_tts(to_speak)
                         if trim_start > 0.0:
                             tts_audio = audio_io.trim_start_seconds(tts_audio, tts_sr, trim_start)
                         if first_play_timestamp is not None and len(first_play_timestamp) == 0:
@@ -186,7 +183,7 @@ def stream_ollama_tts_chunks(
         # Flush remainder
         if buffer.strip():
             try:
-                tts_audio, tts_sr = tts_kokoro.synthesize_kokoro(tts, buffer.strip(), voice)
+                tts_audio, tts_sr = tts_sherpa.synthesize_sherpa_tts(buffer.strip())
                 if trim_start > 0.0:
                     tts_audio = audio_io.trim_start_seconds(tts_audio, tts_sr, trim_start)
                 if first_play_timestamp is not None and len(first_play_timestamp) == 0:
@@ -214,7 +211,7 @@ def stream_ollama_tts_chunks_async(
     temperature: float,
     stop: List[str],
     max_words_per_chunk: int,
-    tts: "Kokoro",
+    tts: Any,
     voice: str,
     output_device: Optional[int],
     volume: float,
@@ -260,7 +257,7 @@ def stream_ollama_tts_chunks_async(
                     audio_queue.put(_AUDIO_SENTINEL)
                     break
                 try:
-                    tts_audio, tts_sr = tts_kokoro.synthesize_kokoro(tts, chunk_text, voice)
+                    tts_audio, tts_sr = tts_sherpa.synthesize_sherpa_tts(chunk_text)
                     if trim_start > 0.0:
                         tts_audio = audio_io.trim_start_seconds(tts_audio, tts_sr, trim_start)
                     audio_queue.put((tts_audio, tts_sr))
