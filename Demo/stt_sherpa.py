@@ -16,7 +16,7 @@ else:
 
 
 def _init_recognizer() -> Optional[object]:
-    """Lazy-initialize sherpa-onnx OnlineRecognizer (streaming transducer).
+    """Lazy-initialize sherpa-onnx OfflineRecognizer for chunked STT.
 
     Expects model files under:
 
@@ -43,26 +43,28 @@ def _init_recognizer() -> Optional[object]:
         return None
 
     try:
-        # Use OnlineRecognizer in a simpler, offline-chunk style configuration:
-        # no endpoint detection (we pass the full utterance at once).
-        recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(  # type: ignore[attr-defined]
-            tokens=str(tokens),
+        # Use OfflineRecognizer.from_transducer for non-streaming, chunked STT.
+        recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(  # type: ignore[attr-defined]
             encoder=str(encoder),
             decoder=str(decoder),
             joiner=str(joiner),
+            tokens=str(tokens),
             num_threads=1,
             sample_rate=16000,
             feature_dim=80,
-            enable_endpoint_detection=False,
+            lm="",
+            lm_scale=0.0,
+            lodr_fst="",
+            lodr_scale=0.0,
             decoding_method="greedy_search",
-            provider="cpu",
             hotwords_file="",
             hotwords_score=1.5,
+            modeling_unit="",
+            bpe_vocab="",
             blank_penalty=0.0,
-            hr_rule_fsts="",
-            hr_lexicon="",
+            debug=False,
         )
-        print(f"[sherpa] OnlineRecognizer initialized from {model_dir}", flush=True)
+        print(f"[sherpa] OfflineRecognizer initialized from {model_dir}", flush=True)
     except Exception as exc:  # pragma: no cover
         print(f"[sherpa] Failed to init recognizer: {exc}", flush=True)
         return None
@@ -91,19 +93,16 @@ def transcribe_sherpa(audio: np.ndarray, sample_rate: int) -> str:
         print("[sherpa] empty waveform passed to transcribe_sherpa()", flush=True)
 
     try:
+        # OfflineRecognizer API: create a stream, accept the full waveform once,
+        # then decode all streams in a batch.
         stream = recognizer.create_stream()  # type: ignore[attr-defined]
         stream.accept_waveform(sample_rate, wav)  # type: ignore[attr-defined]
 
-        # Decode until no streams are ready
-        pending = [stream]
-        while True:
-            ready = [s for s in pending if recognizer.is_ready(s)]  # type: ignore[attr-defined]
-            if not ready:
-                break
-            recognizer.decode_streams(ready)  # type: ignore[attr-defined]
+        recognizer.decode_streams([stream])  # type: ignore[attr-defined]
 
-        result = recognizer.get_result(stream)  # type: ignore[attr-defined]
-        text = getattr(result, "text", "") or ""
+        # Offline stream exposes a .result field with .text
+        result = getattr(stream, "result", None)
+        text = getattr(result, "text", "") if result is not None else ""
         print(f"[sherpa] raw result: {repr(text)}", flush=True)
         return text.strip()
     except Exception as exc:  # pragma: no cover
