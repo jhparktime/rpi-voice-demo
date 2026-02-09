@@ -43,26 +43,26 @@ def _init_recognizer() -> Optional[object]:
         return None
 
     try:
+        # Mirror the official sherpa-onnx microphone example configuration.
         recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(  # type: ignore[attr-defined]
             tokens=str(tokens),
             encoder=str(encoder),
             decoder=str(decoder),
             joiner=str(joiner),
             num_threads=1,
-            provider="cpu",
             sample_rate=16000,
             feature_dim=80,
+            enable_endpoint_detection=True,
+            rule1_min_trailing_silence=2.4,
+            rule2_min_trailing_silence=1.2,
+            rule3_min_utterance_length=300,
             decoding_method="greedy_search",
-            max_active_paths=4,
-            lm="",
-            lm_scale=0.0,
-            lodr_fst="",
-            lodr_scale=0.0,
+            provider="cpu",
             hotwords_file="",
             hotwords_score=1.5,
-            modeling_unit="",
-            bpe_vocab="",
             blank_penalty=0.0,
+            hr_rule_fsts="",
+            hr_lexicon="",
         )
         print(f"[sherpa] OnlineRecognizer initialized from {model_dir}", flush=True)
     except Exception as exc:  # pragma: no cover
