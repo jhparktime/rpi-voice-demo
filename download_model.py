@@ -48,13 +48,13 @@ TOKENIZER_FILES: Iterable[str] = (
 KOKORO_VOICES_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
 KOKORO_ONNX_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx"
 
-# sherpa-onnx STT: we assume you manually download a small streaming English model
-# and place the core files under sherpa_stt/:
-#   tokens.txt
-#   encoder.onnx
-#   decoder.onnx
-#   joiner.onnx
-# The download URLs change over time, so we don't hard-code them here.
+# sherpa-onnx STT: small English streaming Zipformer model (~20M params).
+# We hard-code a stable release archive and extract/copy the needed files.
+SHERPA_ASR_ARCHIVE_URL = (
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+    "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2"
+)
+SHERPA_ASR_ARCHIVE_NAME = "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2"
 
 
 def _download_file(url: str, dst: Path, desc: str) -> None:
@@ -70,6 +70,81 @@ def _download_file(url: str, dst: Path, desc: str) -> None:
                 f.write(chunk)
     size = dst.stat().st_size if dst.exists() else 0
     print(f"[info] Saved {desc} to {dst} ({size} bytes)")
+
+
+def _ensure_sherpa_stt(root: Path) -> bool:
+    """Download and prepare sherpa-onnx English streaming STT into sherpa_stt/.
+
+    Returns True if ready, False on failure (but does not raise).
+    """
+    sherpa_dir = root / "sherpa_stt"
+    tokens = sherpa_dir / "tokens.txt"
+    encoder = sherpa_dir / "encoder.onnx"
+    decoder = sherpa_dir / "decoder.onnx"
+    joiner = sherpa_dir / "joiner.onnx"
+
+    # If already present, nothing to do.
+    if all(p.exists() for p in (tokens, encoder, decoder, joiner)):
+        print(f"[info] sherpa-onnx STT assets already present under {sherpa_dir}")
+        return True
+
+    # Download archive into a temp location under root.
+    tmp_dir = root / ".tmp_sherpa_asr"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = tmp_dir / SHERPA_ASR_ARCHIVE_NAME
+
+    try:
+        if not archive_path.exists():
+            _download_file(SHERPA_ASR_ARCHIVE_URL, archive_path, "sherpa-onnx English streaming ASR")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[error] Failed to download sherpa-onnx ASR archive: {exc}", file=sys.stderr)
+        return False
+
+    # Extract archive
+    try:
+        import tarfile
+
+        with tarfile.open(archive_path, "r:bz2") as tar:
+            tar.extractall(path=tmp_dir)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[error] Failed to extract sherpa-onnx ASR archive: {exc}", file=sys.stderr)
+        return False
+
+    # Find extracted model directory (assume single top-level folder)
+    candidates = [p for p in tmp_dir.iterdir() if p.is_dir() and "zipformer-en-20M" in p.name]
+    if not candidates:
+        # Fallback: any directory with tokens.txt inside.
+        for p in tmp_dir.iterdir():
+            if p.is_dir() and (p / "tokens.txt").exists():
+                candidates.append(p)
+                break
+    if not candidates:
+        print(f"[error] Could not locate extracted sherpa-onnx model in {tmp_dir}", file=sys.stderr)
+        return False
+    model_root = candidates[0]
+
+    # Locate encoder/decoder/joiner ONNX files (prefer int8 if multiple)
+    def _pick(pattern: str) -> Path | None:
+        matches = sorted(model_root.glob(pattern))
+        return matches[0] if matches else None
+
+    src_tokens = model_root / "tokens.txt"
+    src_encoder = _pick("encoder*.onnx")
+    src_decoder = _pick("decoder*.onnx")
+    src_joiner = _pick("joiner*.onnx")
+
+    if not (src_tokens.exists() and src_encoder and src_decoder and src_joiner):
+        print(f"[error] Missing expected sherpa-onnx files under {model_root}", file=sys.stderr)
+        return False
+
+    sherpa_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[info] Preparing sherpa-onnx STT assets under {sherpa_dir}")
+    shutil.copy2(src_tokens, tokens)
+    shutil.copy2(src_encoder, encoder)
+    shutil.copy2(src_decoder, decoder)
+    shutil.copy2(src_joiner, joiner)
+
+    return True
 
 
 def main() -> int:
@@ -156,24 +231,8 @@ def main() -> int:
             print(f"[error] Failed to download Kokoro TTS assets: {exc}", file=sys.stderr)
             return 1
 
-    # sherpa-onnx STT directory check (manual download for now)
-    sherpa_dir = root / "sherpa_stt"
-    tokens = sherpa_dir / "tokens.txt"
-    encoder = sherpa_dir / "encoder.onnx"
-    decoder = sherpa_dir / "decoder.onnx"
-    joiner = sherpa_dir / "joiner.onnx"
-    sherpa_ready = all(p.exists() for p in (tokens, encoder, decoder, joiner))
-    if sherpa_ready:
-        print(f"[info] sherpa-onnx STT assets present under {sherpa_dir}")
-    else:
-        sherpa_dir.mkdir(parents=True, exist_ok=True)
-        print(
-            "[info] sherpa-onnx STT assets not found. "
-            f"Expected tokens/encoder/decoder/joiner under {sherpa_dir}. "
-            "Please download a small English streaming model from the sherpa-onnx docs "
-            "and place the files there.",
-            file=sys.stderr,
-        )
+    # sherpa-onnx STT assets (English, streaming Zipformer, ~20M params)
+    sherpa_ready = _ensure_sherpa_stt(root)
 
     # Final status summary (best-effort)
     try:
@@ -184,7 +243,7 @@ def main() -> int:
         print(f"[summary] Kokoro ONNX:  {kokoro_onnx} ({kokoro_size} bytes)")
         print(f"[summary] Kokoro voices:{kokoro_voices} ({voices_size} bytes)")
         if sherpa_ready:
-            print(f"[summary] sherpa-onnx STT: {sherpa_dir}")
+            print(f"[summary] sherpa-onnx STT: {root / 'sherpa_stt'}")
     except OSError:
         pass
 
