@@ -34,6 +34,9 @@ ENABLE_INTENT_ROUTER = os.environ.get("ENABLE_INTENT_ROUTER", "1").strip() not i
 ENABLE_CLOUD_FILLER = os.environ.get("ENABLE_CLOUD_FILLER", "1").strip() not in {"0", "false", "False", "no", "NO"}
 FORCE_MODE = (os.environ.get("FORCE_MODE", "") or "").strip().upper()
 
+# Warn when STT transcribe time exceeds this (seconds); suggests CPU/thermal/memory check on RPi.
+SLOW_ASR_WARN_THRESHOLD = 10.0
+
 
 def _synthesize_tts(tts: Any, voice: str, text: str, speed: float = 1.0) -> Tuple[np.ndarray, int]:
     """TTS helper: always use sherpa-onnx OfflineTts backend (tts/voice are unused)."""
@@ -499,7 +502,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         t2 = time.perf_counter()
         transcribe_sec = t2 - t1
         print(f"[time] transcribe: {transcribe_sec:.2f}s", flush=True)
-        if transcribe_sec >= stt.TRANSCRIBE_SLOW_WARN_THRESHOLD:
+        if transcribe_sec >= SLOW_ASR_WARN_THRESHOLD:
             print(
                 f"[warn] transcribe very slow ({transcribe_sec:.1f}s); check CPU/thermal/memory",
                 file=sys.stderr,
