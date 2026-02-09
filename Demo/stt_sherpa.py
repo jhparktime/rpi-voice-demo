@@ -64,6 +64,7 @@ def _init_recognizer() -> Optional[object]:
             bpe_vocab="",
             blank_penalty=0.0,
         )
+        print(f"[sherpa] OnlineRecognizer initialized from {model_dir}", flush=True)
     except Exception as exc:  # pragma: no cover
         print(f"[sherpa] Failed to init recognizer: {exc}", flush=True)
         return None
@@ -83,6 +84,14 @@ def transcribe_sherpa(audio: np.ndarray, sample_rate: int) -> str:
 
     # sherpa-onnx expects float32 mono waveform
     wav = audio.astype(np.float32)
+    # Light-weight debugging to help diagnose empty-text issues on devices.
+    # 이 로그는 문제가 없으면 크게 부담을 주지 않습니다.
+    if wav.size:
+        max_abs = float(np.max(np.abs(wav)))
+        print(f"[sherpa] input len={wav.size} max_abs={max_abs:.4f}", flush=True)
+    else:
+        print("[sherpa] empty waveform passed to transcribe_sherpa()", flush=True)
+
     try:
         stream = recognizer.create_stream()  # type: ignore[attr-defined]
         stream.accept_waveform(sample_rate, wav)  # type: ignore[attr-defined]
@@ -102,6 +111,7 @@ def transcribe_sherpa(audio: np.ndarray, sample_rate: int) -> str:
 
         result = recognizer.get_result(stream)  # type: ignore[attr-defined]
         text = getattr(result, "text", "") or ""
+        print(f"[sherpa] raw result: {repr(text)}", flush=True)
         return text.strip()
     except Exception as exc:  # pragma: no cover
         print(f"[sherpa] transcribe error: {exc}", flush=True)
