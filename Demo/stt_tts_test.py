@@ -12,8 +12,9 @@ import sys
 import time
 import concurrent.futures
 from pathlib import Path
-from typing import Any, Iterable, List, Optional
+from typing import Any, Iterable, List, Optional, Tuple
 
+import numpy as np
 from faster_whisper import WhisperModel
 from kokoro_onnx import Kokoro
 
@@ -26,6 +27,7 @@ from . import stt_sherpa
 from . import stt_tts_cli
 from . import text_utils
 from . import tts_kokoro
+from . import tts_sherpa
 from .emotion import EmotionClassifierONNX, EmotionResult
 from .intent_router import classify_intent_easy_or_complex
 from . import router_anchors_runtime
@@ -36,6 +38,16 @@ ENABLE_EMOTION = os.environ.get("ENABLE_EMOTION", "1").strip() not in {"0", "fal
 ENABLE_INTENT_ROUTER = os.environ.get("ENABLE_INTENT_ROUTER", "1").strip() not in {"0", "false", "False", "no", "NO"}
 ENABLE_CLOUD_FILLER = os.environ.get("ENABLE_CLOUD_FILLER", "1").strip() not in {"0", "false", "False", "no", "NO"}
 FORCE_MODE = (os.environ.get("FORCE_MODE", "") or "").strip().upper()
+
+
+def _synthesize_tts(tts: Kokoro, voice: str, text: str, speed: float = 1.0) -> Tuple[np.ndarray, int]:
+    """Backend-agnostic TTS: sherpa-onnx in baseline mode, Kokoro otherwise."""
+    if DEMO_MODE == "baseline":
+        audio, sr = tts_sherpa.synthesize_sherpa_tts(text, speed=speed)
+        if sr <= 0 or audio.size == 0:
+            raise RuntimeError("sherpa-onnx TTS synthesis failed")
+        return audio, sr
+    return tts_kokoro.synthesize_kokoro(tts, text, voice)
 
 
 def _run_turn_onnx_llm(
@@ -70,7 +82,7 @@ def _run_turn_onnx_llm(
     t2b = time.perf_counter()
     print("Synthesizing...", flush=True)
     try:
-        tts_audio, tts_sr = tts_kokoro.synthesize_kokoro(tts, tts_text, voice)
+        tts_audio, tts_sr = _synthesize_tts(tts, voice, tts_text)
     except Exception as exc:  # noqa: BLE001
         print(f"[error] TTS failed: {exc}", file=sys.stderr)
         return
@@ -179,7 +191,7 @@ def _run_turn_ollama_or_direct(t0: float, args: Any, text: str, tts: Kokoro, voi
     t2b = time.perf_counter()
     print("Synthesizing...", flush=True)
     try:
-        tts_audio, tts_sr = tts_kokoro.synthesize_kokoro(tts, tts_text, voice)
+        tts_audio, tts_sr = _synthesize_tts(tts, voice, tts_text)
     except Exception as exc:  # noqa: BLE001
         print(f"[error] TTS failed: {exc}", file=sys.stderr)
         return
@@ -287,7 +299,7 @@ def _run_turn_brain(
                 t2b = time.perf_counter()
                 print("Synthesizing (filler)...", flush=True)
                 try:
-                    tts_audio, tts_sr = tts_kokoro.synthesize_kokoro(tts, filler_reply, voice)
+                    tts_audio, tts_sr = _synthesize_tts(tts, voice, filler_reply)
                 except Exception as exc:  # noqa: BLE001
                     print(f"[error] TTS filler failed: {exc}", file=sys.stderr)
                 else:
@@ -312,7 +324,7 @@ def _run_turn_brain(
         t2b = time.perf_counter()
         print("Synthesizing (cloud)...", flush=True)
         try:
-            tts_audio, tts_sr = tts_kokoro.synthesize_kokoro(tts, tts_text, voice)
+            tts_audio, tts_sr = _synthesize_tts(tts, voice, tts_text)
         except Exception as exc:  # noqa: BLE001
             print(f"[error] TTS failed: {exc}", file=sys.stderr)
             return
@@ -370,7 +382,7 @@ def _run_turn_brain(
     t2b = time.perf_counter()
     print("Synthesizing...", flush=True)
     try:
-        tts_audio, tts_sr = tts_kokoro.synthesize_kokoro(tts, tts_text, voice)
+        tts_audio, tts_sr = _synthesize_tts(tts, voice, tts_text)
     except Exception as exc:  # noqa: BLE001
         print(f"[error] TTS failed: {exc}", file=sys.stderr)
         return

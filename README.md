@@ -11,7 +11,8 @@ Voice demo for Raspberry Pi:
 - Intent: simple LOCAL vs CLOUD routing based on sentence embeddings
 - LOCAL LLM: Ollama (e.g. `smollm2:360m`) on the Pi
 - CLOUD LLM: external HTTP API hook (optional)
-- TTS: Kokoro ONNX
+- TTS (baseline): sherpa-onnx VITS Piper (GLaDOS)
+- TTS (custom): Kokoro ONNX
 
 Run from the directory that contains the `Demo/` package:
 
@@ -21,8 +22,8 @@ python -m Demo
 
 The behavior is controlled by `DEMO_MODE`:
 
-- `DEMO_MODE=baseline` (default): sherpa-onnx STT front-end + existing emotion/intent/LLM/TTS pipeline.
-- `DEMO_MODE=custom`: original Faster-Whisper STT front-end.
+- `DEMO_MODE=baseline` (default): sherpa-onnx STT + sherpa-onnx TTS front-end + existing emotion/intent/LLM pipeline.
+- `DEMO_MODE=custom`: original Faster-Whisper STT + Kokoro TTS front-end.
 
 Examples:
 
@@ -143,18 +144,31 @@ models/
 
 using the official `kokoro-onnx` GitHub release URLs. After this, `python -m Demo` can use Kokoro for TTS.
 
-## sherpa-onnx STT model files
+## sherpa-onnx STT/TTS model files
 
-For the baseline mode, `Demo/stt_sherpa.py` expects a sherpa-onnx English STT model under:
+For the baseline mode, we use sherpa-onnx for both STT and TTS.
 
-```text
-sherpa_stt/
-  tokens.txt
-  encoder.onnx
-  decoder.onnx
-  joiner.onnx
-```
+- `Demo/stt_sherpa.py` expects an English streaming STT model under:
+
+  ```text
+  sherpa_stt/
+    tokens.txt
+    encoder.onnx
+    decoder.onnx
+    joiner.onnx
+  ```
+
+- `Demo/tts_sherpa.py` expects an English VITS Piper TTS model under:
+
+  ```text
+  sherpa_tts/
+    model.onnx
+    tokens.txt
+    espeak-ng-data/
+  ```
 
 These files are **not stored in git**.  
-Use the sherpa-onnx documentation to download a suitable small English streaming model and copy the core files into `sherpa_stt/`.  
-`download_model.py` will check this directory and print a hint if the files are missing.
+`download_model.py` will automatically download and prepare:
+
+- A small English streaming STT model (Zipformer, ~20M params) into `sherpa_stt/`
+- An English VITS Piper TTS model (GLaDOS voice) into `sherpa_tts/`

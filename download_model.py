@@ -56,6 +56,13 @@ SHERPA_ASR_ARCHIVE_URL = (
 )
 SHERPA_ASR_ARCHIVE_NAME = "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2"
 
+# sherpa-onnx TTS: English VITS Piper model (GLaDOS voice, ~61 MB).
+SHERPA_TTS_ARCHIVE_URL = (
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/"
+    "vits-piper-en_US-glados.tar.bz2"
+)
+SHERPA_TTS_ARCHIVE_NAME = "vits-piper-en_US-glados.tar.bz2"
+
 
 def _download_file(url: str, dst: Path, desc: str) -> None:
     """Stream download a file to dst."""
@@ -147,6 +154,73 @@ def _ensure_sherpa_stt(root: Path) -> bool:
     return True
 
 
+def _ensure_sherpa_tts(root: Path) -> bool:
+    """Download and prepare sherpa-onnx English TTS into sherpa_tts/.
+
+    Uses the vits-piper-en_US-glados model (~61 MB).
+    Returns True if ready, False on failure (but does not raise).
+    """
+    tts_dir = root / "sherpa_tts"
+    model = tts_dir / "model.onnx"
+    tokens = tts_dir / "tokens.txt"
+    data_dir = tts_dir / "espeak-ng-data"
+
+    if model.exists() and tokens.exists() and data_dir.exists():
+        print(f"[info] sherpa-onnx TTS assets already present under {tts_dir}")
+        return True
+
+    tmp_dir = root / ".tmp_sherpa_tts"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = tmp_dir / SHERPA_TTS_ARCHIVE_NAME
+
+    try:
+        if not archive_path.exists():
+            _download_file(SHERPA_TTS_ARCHIVE_URL, archive_path, "sherpa-onnx English TTS (vits-piper-en_US-glados)")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[error] Failed to download sherpa-onnx TTS archive: {exc}", file=sys.stderr)
+        return False
+
+    # Extract archive
+    try:
+        import tarfile
+
+        with tarfile.open(archive_path, "r:bz2") as tar:
+            tar.extractall(path=tmp_dir)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[error] Failed to extract sherpa-onnx TTS archive: {exc}", file=sys.stderr)
+        return False
+
+    # Expect directory vits-piper-en_US-glados/
+    model_root = tmp_dir / "vits-piper-en_US-glados"
+    if not model_root.exists():
+        # Fallback: first dir with expected files
+        for p in tmp_dir.iterdir():
+            if p.is_dir() and (p / "tokens.txt").exists():
+                model_root = p
+                break
+
+    src_model = model_root / "en_US-glados.onnx"
+    src_tokens = model_root / "tokens.txt"
+    src_data = model_root / "espeak-ng-data"
+
+    if not (src_model.exists() and src_tokens.exists() and src_data.exists()):
+        print(f"[error] Missing expected sherpa-onnx TTS files under {model_root}", file=sys.stderr)
+        return False
+
+    tts_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[info] Preparing sherpa-onnx TTS assets under {tts_dir}")
+    shutil.copy2(src_model, model)
+    shutil.copy2(src_tokens, tokens)
+
+    # Copy espeak-ng-data directory (merge if already exists)
+    dst_data = tts_dir / "espeak-ng-data"
+    if dst_data.exists():
+        shutil.rmtree(dst_data)
+    shutil.copytree(src_data, dst_data)
+
+    return True
+
+
 def main() -> int:
     root = Path(__file__).resolve().parent
 
@@ -232,7 +306,10 @@ def main() -> int:
             return 1
 
     # sherpa-onnx STT assets (English, streaming Zipformer, ~20M params)
-    sherpa_ready = _ensure_sherpa_stt(root)
+    sherpa_stt_ready = _ensure_sherpa_stt(root)
+
+    # sherpa-onnx TTS assets (English VITS Piper, GLaDOS voice)
+    sherpa_tts_ready = _ensure_sherpa_tts(root)
 
     # Final status summary (best-effort)
     try:
@@ -242,8 +319,10 @@ def main() -> int:
         print(f"[summary] Emotion ONNX: {target_onnx} ({emo_size} bytes)")
         print(f"[summary] Kokoro ONNX:  {kokoro_onnx} ({kokoro_size} bytes)")
         print(f"[summary] Kokoro voices:{kokoro_voices} ({voices_size} bytes)")
-        if sherpa_ready:
+        if sherpa_stt_ready:
             print(f"[summary] sherpa-onnx STT: {root / 'sherpa_stt'}")
+        if sherpa_tts_ready:
+            print(f"[summary] sherpa-onnx TTS: {root / 'sherpa_tts'}")
     except OSError:
         pass
 
