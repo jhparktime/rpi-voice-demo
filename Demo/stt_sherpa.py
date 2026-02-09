@@ -43,7 +43,8 @@ def _init_recognizer() -> Optional[object]:
         return None
 
     try:
-        # Mirror the official sherpa-onnx microphone example configuration.
+        # Use OnlineRecognizer in a simpler, offline-chunk style configuration:
+        # no endpoint detection (we pass the full utterance at once).
         recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(  # type: ignore[attr-defined]
             tokens=str(tokens),
             encoder=str(encoder),
@@ -52,10 +53,7 @@ def _init_recognizer() -> Optional[object]:
             num_threads=1,
             sample_rate=16000,
             feature_dim=80,
-            enable_endpoint_detection=True,
-            rule1_min_trailing_silence=2.4,
-            rule2_min_trailing_silence=1.2,
-            rule3_min_utterance_length=300,
+            enable_endpoint_detection=False,
             decoding_method="greedy_search",
             provider="cpu",
             hotwords_file="",
@@ -95,11 +93,6 @@ def transcribe_sherpa(audio: np.ndarray, sample_rate: int) -> str:
     try:
         stream = recognizer.create_stream()  # type: ignore[attr-defined]
         stream.accept_waveform(sample_rate, wav)  # type: ignore[attr-defined]
-
-        # Add a small tail padding and mark end of input (mimic examples)
-        tail = np.zeros(int(0.66 * sample_rate), dtype=np.float32)
-        stream.accept_waveform(sample_rate, tail)  # type: ignore[attr-defined]
-        stream.input_finished()  # type: ignore[attr-defined]
 
         # Decode until no streams are ready
         pending = [stream]
