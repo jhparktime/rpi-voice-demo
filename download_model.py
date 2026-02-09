@@ -1,4 +1,4 @@
-"""Download emotion_onnx_int8 and Kokoro TTS model assets.
+"""Download emotion_onnx_int8, Kokoro TTS, and (optionally) sherpa-onnx STT assets.
 
 Usage (on Raspberry Pi, inside venv):
 
@@ -47,6 +47,14 @@ TOKENIZER_FILES: Iterable[str] = (
 
 KOKORO_VOICES_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
 KOKORO_ONNX_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx"
+
+# sherpa-onnx STT: we assume you manually download a small streaming English model
+# and place the core files under sherpa_stt/:
+#   tokens.txt
+#   encoder.onnx
+#   decoder.onnx
+#   joiner.onnx
+# The download URLs change over time, so we don't hard-code them here.
 
 
 def _download_file(url: str, dst: Path, desc: str) -> None:
@@ -148,6 +156,25 @@ def main() -> int:
             print(f"[error] Failed to download Kokoro TTS assets: {exc}", file=sys.stderr)
             return 1
 
+    # sherpa-onnx STT directory check (manual download for now)
+    sherpa_dir = root / "sherpa_stt"
+    tokens = sherpa_dir / "tokens.txt"
+    encoder = sherpa_dir / "encoder.onnx"
+    decoder = sherpa_dir / "decoder.onnx"
+    joiner = sherpa_dir / "joiner.onnx"
+    sherpa_ready = all(p.exists() for p in (tokens, encoder, decoder, joiner))
+    if sherpa_ready:
+        print(f"[info] sherpa-onnx STT assets present under {sherpa_dir}")
+    else:
+        sherpa_dir.mkdir(parents=True, exist_ok=True)
+        print(
+            "[info] sherpa-onnx STT assets not found. "
+            f"Expected tokens/encoder/decoder/joiner under {sherpa_dir}. "
+            "Please download a small English streaming model from the sherpa-onnx docs "
+            "and place the files there.",
+            file=sys.stderr,
+        )
+
     # Final status summary (best-effort)
     try:
         emo_size = target_onnx.stat().st_size if target_onnx.exists() else 0
@@ -156,6 +183,8 @@ def main() -> int:
         print(f"[summary] Emotion ONNX: {target_onnx} ({emo_size} bytes)")
         print(f"[summary] Kokoro ONNX:  {kokoro_onnx} ({kokoro_size} bytes)")
         print(f"[summary] Kokoro voices:{kokoro_voices} ({voices_size} bytes)")
+        if sherpa_ready:
+            print(f"[summary] sherpa-onnx STT: {sherpa_dir}")
     except OSError:
         pass
 

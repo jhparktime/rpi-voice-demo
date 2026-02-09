@@ -5,7 +5,8 @@ rpi-voice-demo
 
 Voice demo for Raspberry Pi:
 
-- STT: Faster-Whisper (`distil-small.en`)
+- STT (baseline): sherpa-onnx (low-latency)
+- STT (custom): Faster-Whisper (`distil-small.en`)
 - Emotion: ONNX BERT classifier (GoEmotions-style, optional)
 - Intent: simple LOCAL vs CLOUD routing based on sentence embeddings
 - LOCAL LLM: Ollama (e.g. `smollm2:360m`) on the Pi
@@ -16,6 +17,21 @@ Run from the directory that contains the `Demo/` package:
 
 ```bash
 python -m Demo
+```
+
+The behavior is controlled by `DEMO_MODE`:
+
+- `DEMO_MODE=baseline` (default): sherpa-onnx STT front-end + existing emotion/intent/LLM/TTS pipeline.
+- `DEMO_MODE=custom`: original Faster-Whisper STT front-end.
+
+Examples:
+
+```bash
+# Baseline (sherpa-onnx STT)
+python -m Demo
+
+# Custom pipeline (Faster-Whisper + Ollama)
+DEMO_MODE=custom python -m Demo --ollama --ollama-model smollm2:360m
 ```
 
 ## Environment flags (RPi)
@@ -126,3 +142,19 @@ models/
 ```
 
 using the official `kokoro-onnx` GitHub release URLs. After this, `python -m Demo` can use Kokoro for TTS.
+
+## sherpa-onnx STT model files
+
+For the baseline mode, `Demo/stt_sherpa.py` expects a sherpa-onnx English STT model under:
+
+```text
+sherpa_stt/
+  tokens.txt
+  encoder.onnx
+  decoder.onnx
+  joiner.onnx
+```
+
+These files are **not stored in git**.  
+Use the sherpa-onnx documentation to download a suitable small English streaming model and copy the core files into `sherpa_stt/`.  
+`download_model.py` will check this directory and print a hint if the files are missing.

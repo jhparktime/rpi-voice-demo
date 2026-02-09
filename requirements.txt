@@ -8,3 +8,4 @@ onnxruntime
 transformers
 sentence-transformers
 huggingface_hub
+sherpa-onnx

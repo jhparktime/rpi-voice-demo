@@ -22,6 +22,7 @@ from . import cloud_llm
 from . import llm_ollama
 from . import llm_onnx
 from . import stt
+from . import stt_sherpa
 from . import stt_tts_cli
 from . import text_utils
 from . import tts_kokoro
@@ -30,6 +31,7 @@ from .intent_router import classify_intent_easy_or_complex
 from . import router_anchors_runtime
 
 
+DEMO_MODE = (os.environ.get("DEMO_MODE", "baseline") or "baseline").lower()
 ENABLE_EMOTION = os.environ.get("ENABLE_EMOTION", "1").strip() not in {"0", "false", "False", "no", "NO"}
 ENABLE_INTENT_ROUTER = os.environ.get("ENABLE_INTENT_ROUTER", "1").strip() not in {"0", "false", "False", "no", "NO"}
 ENABLE_CLOUD_FILLER = os.environ.get("ENABLE_CLOUD_FILLER", "1").strip() not in {"0", "false", "False", "no", "NO"}
@@ -394,15 +396,17 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         print("[error] --trim-start must be >= 0.", file=sys.stderr)
         return 1
 
-    try:
-        asr_model = WhisperModel(
-            "distil-small.en",
-            device="cpu",
-            compute_type=args.asr_compute_type,
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"[fatal] ASR model load failed: {exc}", file=sys.stderr)
-        return 1
+    asr_model = None
+    if DEMO_MODE == "custom":
+        try:
+            asr_model = WhisperModel(
+                "distil-small.en",
+                device="cpu",
+                compute_type=args.asr_compute_type,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[fatal] ASR model load failed: {exc}", file=sys.stderr)
+            return 1
 
     try:
         tts = Kokoro(
@@ -419,8 +423,12 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         voice = available_voices[0] if available_voices else "af_alloy"
         print(f"[info] voice '{args.voice}' not found, using '{voice}'. Available: {available_voices}", file=sys.stderr)
 
-    print("Faster-Whisper + Kokoro demo")
-    print(f"- ASR: distil-small.en (compute_type={args.asr_compute_type})")
+    print("Voice demo")
+    print(f"- demo mode: {DEMO_MODE}")
+    if DEMO_MODE == "custom":
+        print(f"- ASR: distil-small.en (compute_type={args.asr_compute_type})")
+    else:
+        print("- ASR: sherpa-onnx (baseline)")
     print(f"- TTS model: {args.kokoro_model}")
     print(f"- TTS voices: {args.kokoro_voices}")
     print(f"- voice: {voice} (available: {available_voices})")
@@ -506,11 +514,18 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             continue
 
         print("Transcribing...", flush=True)
-        try:
-            text = stt.transcribe_faster_whisper(asr_model, audio, beam_size=args.beam_size)
-        except Exception as exc:  # noqa: BLE001
-            print(f"[error] ASR failed: {exc}", file=sys.stderr)
-            continue
+        if DEMO_MODE == "baseline":
+            try:
+                text = stt_sherpa.transcribe_sherpa(audio, audio_io.SAMPLE_RATE)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[error] sherpa-onnx ASR failed: {exc}", file=sys.stderr)
+                continue
+        else:
+            try:
+                text = stt.transcribe_faster_whisper(asr_model, audio, beam_size=args.beam_size)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[error] ASR failed: {exc}", file=sys.stderr)
+                continue
         t2 = time.perf_counter()
         transcribe_sec = t2 - t1
         print(f"[time] transcribe: {transcribe_sec:.2f}s", flush=True)
