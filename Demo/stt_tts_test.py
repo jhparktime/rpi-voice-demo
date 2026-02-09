@@ -423,26 +423,75 @@ def _run_turn_brain(
 # ── Warmup helpers ─────────────────────────────────────────────────────────
 
 def _warmup(args: Any, emotion_classifier: Optional[EmotionClassifierONNX]) -> None:
-    """Best-effort warm-up of embedder, emotion, cloud LLM, and STT recognizer."""
+    """Warm-up all major components: STT, TTS, Emotion, Intent Router, LLMs."""
+    print("[Warmup] Initializing all modules...", flush=True)
+    
+    # 1. STT Recognizer (sherpa-onnx OnlineRecognizer)
+    print("[Warmup] Loading STT recognizer...", flush=True)
+    stt_sherpa.get_recognizer()
+    if args.vad:
+        print("[Warmup] Loading VAD...", flush=True)
+        stt_sherpa.get_vad()
+    
+    # 2. TTS (sherpa-onnx OfflineTts)
+    print("[Warmup] Loading TTS...", flush=True)
     try:
-        if ENABLE_INTENT_ROUTER:
+        _, _ = tts_sherpa.synthesize_sherpa_tts("Warming up text to speech.", speed=1.0)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[Warmup] TTS warning: {exc}", file=sys.stderr)
+    
+    # 3. Intent Router (SentenceTransformer + embeddings)
+    if ENABLE_INTENT_ROUTER:
+        print("[Warmup] Loading intent router...", flush=True)
+        try:
             _ = router_anchors_runtime.route_local_or_cloud("Warmup for routing.")
-        if ENABLE_EMOTION and emotion_classifier is not None and emotion_classifier.available:
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Warmup] Intent router warning: {exc}", file=sys.stderr)
+    
+    # 4. Emotion Classifier (ONNX BERT)
+    if ENABLE_EMOTION and emotion_classifier is not None and emotion_classifier.available:
+        print("[Warmup] Loading emotion classifier...", flush=True)
+        try:
             _ = emotion_classifier.predict("Hello, just warming up.")
-        cloud_url = (os.environ.get("CLOUD_LLM_URL") or "").strip()
-        if cloud_url:
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Warmup] Emotion warning: {exc}", file=sys.stderr)
+    
+    # 5. Ollama LLM (if enabled)
+    if args.ollama:
+        print(f"[Warmup] Warming up Ollama ({args.ollama_model})...", flush=True)
+        try:
+            _ = llm_ollama.generate_ollama(
+                prompt="Hi",
+                model=args.ollama_model,
+                system=text_utils.OLLAMA_DEFAULT_SYSTEM,
+                url=args.ollama_url,
+                num_predict=1,
+                temperature=0.0,
+                keep_alive=args.ollama_keep_alive,
+                num_thread=args.ollama_num_thread,
+                num_ctx=args.ollama_num_ctx,
+                num_batch=args.ollama_num_batch,
+                max_sentences=1,
+                max_words=2,
+                timeout=30,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Warmup] Ollama warning: {exc}", file=sys.stderr)
+    
+    # 6. Cloud LLM (if configured)
+    cloud_url = (os.environ.get("CLOUD_LLM_URL") or "").strip()
+    if cloud_url:
+        print("[Warmup] Testing cloud LLM connection...", flush=True)
+        try:
             _ = cloud_llm.call_cloud_llm(
                 prompt="Warmup request.",
                 system="You are a friendly, reliable assistant. This is a warmup call; a short reply is fine.",
                 timeout=5.0,
             )
-    except Exception as exc:  # noqa: BLE001
-        print(f"[Warmup] warning: {exc}", file=sys.stderr)
-
-    # Pre-initialize STT recognizer so the first turn isn't slow.
-    stt_sherpa.get_recognizer()
-    if args.vad:
-        stt_sherpa.get_vad()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Warmup] Cloud LLM warning: {exc}", file=sys.stderr)
+    
+    print("[Warmup] All modules ready!", flush=True)
 
 
 # ── Main entry point ───────────────────────────────────────────────────────
@@ -483,30 +532,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     else:
         print(f"- record seconds: {args.record_seconds}")
 
-    # LOCAL LLM (Ollama) warmup
+    # LLM config display
     if args.ollama:
         print(f"- ollama: {args.ollama_model} @ {args.ollama_url}")
         print(f"- ollama-stream: {args.ollama_stream} (async: {args.ollama_stream_async}, max-words/chunk: {args.ollama_stream_max_words})")
-        print("Preloading Ollama model...", flush=True)
-        try:
-            llm_ollama.generate_ollama(
-                prompt="Hi",
-                model=args.ollama_model,
-                system=text_utils.OLLAMA_DEFAULT_SYSTEM,
-                url=args.ollama_url,
-                num_predict=1,
-                temperature=0.0,
-                keep_alive=args.ollama_keep_alive,
-                num_thread=args.ollama_num_thread,
-                num_ctx=args.ollama_num_ctx,
-                num_batch=args.ollama_num_batch,
-                max_sentences=1,
-                max_words=2,
-                timeout=60,
-            )
-            print("Ollama model ready.", flush=True)
-        except Exception as e:  # noqa: BLE001
-            print(f"[warn] Ollama preload failed: {e}", file=sys.stderr)
 
     stt_tts_cli.print_config(args, voice)
 
