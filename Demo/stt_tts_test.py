@@ -387,6 +387,26 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         if not getattr(emotion_classifier, "available", False):
             emotion_classifier = None
 
+    # --- Warm-up phase: embedder / emotion / cloud LLM ---
+    # This increases startup time a bit but avoids first-turn spikes.
+    try:
+        if ENABLE_INTENT_ROUTER:
+            # Warm up anchors-based router (loads SentenceTransformer + anchor embeddings).
+            _ = router_anchors_runtime.route_local_or_cloud("Warmup for routing.")
+        if ENABLE_EMOTION and emotion_classifier is not None and emotion_classifier.available:
+            # Warm up emotion classifier ONNX + tokenizer.
+            _ = emotion_classifier.predict("Hello, just warming up.")
+        cloud_url = (os.environ.get("CLOUD_LLM_URL") or "").strip()
+        if cloud_url:
+            # Best-effort CLOUD LLM warm-up; ignore errors so LOCAL path still works.
+            _ = cloud_llm.call_cloud_llm(
+                prompt="Warmup request.",
+                system="You are a friendly, reliable assistant. This is a warmup call; a short reply is fine.",
+                timeout=5.0,
+            )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[Warmup] warning: {exc}", file=sys.stderr)
+
     while True:
         try:
             input(">>> ")
