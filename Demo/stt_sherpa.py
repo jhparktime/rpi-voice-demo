@@ -16,7 +16,7 @@ else:
 
 
 def _init_recognizer() -> Optional[object]:
-    """Lazy-initialize sherpa-onnx OfflineRecognizer.
+    """Lazy-initialize sherpa-onnx OfflineRecognizer (transducer, offline).
 
     Expects model files under:
 
@@ -32,11 +32,6 @@ def _init_recognizer() -> Optional[object]:
     if _RECOGNIZER is not None:
         return _RECOGNIZER
 
-    try:
-        sherpa_onnx  # type: ignore[name-defined]
-    except Exception:
-        return None
-
     root = Path(__file__).resolve().parent.parent
     model_dir = Path(os.environ.get("SHERPA_STT_DIR", root / "sherpa_stt"))
     tokens = model_dir / "tokens.txt"
@@ -48,13 +43,18 @@ def _init_recognizer() -> Optional[object]:
         return None
 
     try:
-        config = sherpa_onnx.OfflineRecognizerConfig(  # type: ignore[attr-defined]
-            tokens=str(tokens),
+        # Use convenience constructor for transducer offline models.
+        recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(  # type: ignore[attr-defined]
             encoder=str(encoder),
             decoder=str(decoder),
             joiner=str(joiner),
+            tokens=str(tokens),
+            num_threads=1,
+            sample_rate=16000,
+            feature_dim=80,
+            decoding_method="greedy_search",
+            debug=False,
         )
-        recognizer = sherpa_onnx.OfflineRecognizer(config)  # type: ignore[attr-defined]
     except Exception as exc:  # pragma: no cover
         print(f"[sherpa] Failed to init recognizer: {exc}", flush=True)
         return None
@@ -77,7 +77,8 @@ def transcribe_sherpa(audio: np.ndarray, sample_rate: int) -> str:
     try:
         stream = recognizer.create_stream()  # type: ignore[attr-defined]
         stream.accept_waveform(sample_rate, wav)  # type: ignore[attr-defined]
-        recognizer.decode_stream(stream)  # type: ignore[attr-defined]
+        # OfflineRecognizer decodes batches of streams; we pass a single one.
+        recognizer.decode_streams([stream])  # type: ignore[attr-defined]
         result = stream.result  # type: ignore[attr-defined]
         text = getattr(result, "text", "") or ""
         return text.strip()
