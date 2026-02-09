@@ -4,3 +4,7 @@ scipy
 faster-whisper
 kokoro-onnx
 requests
+onnxruntime
+transformers
+sentence-transformers
+huggingface_hub

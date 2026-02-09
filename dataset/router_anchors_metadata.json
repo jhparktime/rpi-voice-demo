@@ -1,0 +1,15 @@
+{
+    "local_count": 50,
+    "cloud_count": 50,
+    "local_embedding_shape": [
+        50,
+        384
+    ],
+    "cloud_embedding_shape": [
+        50,
+        384
+    ],
+    "embedding_model": "all-MiniLM-L6-v2",
+    "embedding_normalized": true,
+    "embedding_dtype": "<class 'numpy.float16'>"
+}

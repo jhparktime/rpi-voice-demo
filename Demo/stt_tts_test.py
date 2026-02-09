@@ -1,25 +1,38 @@
 """
-Faster-Whisper (distil-small.en) STT -> Kokoro v0.19 ONNX TTS demo (RPi).
+Faster-Whisper (distil-small.en) STT -> Emotion + Intent routing -> LOCAL/CLOUD LLM -> Kokoro v0.19 ONNX TTS demo (RPi).
 
-Optional: --ollama (Ollama/smolLM2) or --onnx-llm (ONNX SmolLM2-135M) between STT and TTS for voice chatbot.
+LOCAL: Ollama (e.g., smollm2:360m) with empathic prompt.
+CLOUD: external HTTP LLM (if configured) with informational prompt.
 """
 from __future__ import annotations
 
 import gc
+import os
 import sys
 import time
+import concurrent.futures
+from pathlib import Path
 from typing import Any, Iterable, List, Optional
 
 from faster_whisper import WhisperModel
 from kokoro_onnx import Kokoro
 
 from . import audio_io
+from . import cloud_llm
 from . import llm_ollama
 from . import llm_onnx
 from . import stt
 from . import stt_tts_cli
 from . import text_utils
 from . import tts_kokoro
+from .emotion import EmotionClassifierONNX, EmotionResult
+from .intent_router import classify_intent_easy_or_complex
+from . import router_anchors_runtime
+
+
+ENABLE_EMOTION = os.environ.get("ENABLE_EMOTION", "1").strip() not in {"0", "false", "False", "no", "NO"}
+ENABLE_INTENT_ROUTER = os.environ.get("ENABLE_INTENT_ROUTER", "1").strip() not in {"0", "false", "False", "no", "NO"}
+FORCE_MODE = (os.environ.get("FORCE_MODE", "") or "").strip().upper()
 
 
 def _run_turn_onnx_llm(
@@ -180,6 +193,121 @@ def _run_turn_ollama_or_direct(t0: float, args: Any, text: str, tts: Kokoro, voi
     print(f"[time] play: {t4 - t3:.2f}s (total: {t4 - t0:.2f}s)", flush=True)
 
 
+def _run_turn_brain(
+    t0: float,
+    args: Any,
+    text: str,
+    tts: Kokoro,
+    voice: str,
+    emotion_classifier: Optional[EmotionClassifierONNX],
+) -> None:
+    """Route using emotion + intent, call LOCAL or CLOUD LLM, then TTS."""
+    route_mode = "LOCAL"
+    emotion_result: Optional[EmotionResult] = None
+
+    # Respect FORCE_MODE override first
+    if FORCE_MODE in {"LOCAL", "CLOUD"}:
+        route_mode = FORCE_MODE
+        if ENABLE_EMOTION and emotion_classifier and emotion_classifier.available:
+            try:
+                emotion_result = emotion_classifier.predict(text)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Emotion] error: {exc}", file=sys.stderr)
+                emotion_result = None
+    else:
+        # Optionally run emotion + intent in parallel
+        def _run_emotion() -> Optional[EmotionResult]:
+            if not (ENABLE_EMOTION and emotion_classifier and emotion_classifier.available):
+                return None
+            try:
+                return emotion_classifier.predict(text)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Emotion] error: {exc}", file=sys.stderr)
+                return None
+
+        def _run_intent() -> str:
+            if not ENABLE_INTENT_ROUTER:
+                return "LOCAL"
+            # Prefer anchors-based router; fall back to simple classifier on error.
+            try:
+                rr = router_anchors_runtime.route_local_or_cloud(text)
+                print(
+                    f"[Route] mode={rr.mode} conf={rr.confidence:.2f} "
+                    f"(local={rr.best_local:.2f}, cloud={rr.best_cloud:.2f}, Δ={rr.delta:.2f}) | "
+                    f"anchor={rr.matched_anchor!r}",
+                    flush=True,
+                )
+                return rr.mode
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Intent] anchors-router error: {exc}", file=sys.stderr)
+                try:
+                    return classify_intent_easy_or_complex(text)
+                except Exception as exc2:  # noqa: BLE001
+                    print(f"[Intent] simple classifier error: {exc2}", file=sys.stderr)
+                    return "LOCAL"
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fut_emotion = ex.submit(_run_emotion)
+            fut_intent = ex.submit(_run_intent)
+            emotion_result = fut_emotion.result()
+            route_mode = fut_intent.result()
+
+    emotion_label = emotion_result.label if emotion_result is not None else None
+
+    # Build system prompt based on route
+    if route_mode == "CLOUD":
+        system = text_utils.build_cloud_system_prompt(emotion_label)
+        reply = cloud_llm.call_cloud_llm(prompt=text, system=system, timeout=20.0)
+    else:
+        # LOCAL (default) – use Ollama if enabled, otherwise just echo ASR text
+        system = text_utils.build_local_system_prompt(emotion_label)
+        reply = ""
+        if args.ollama:
+            print("Ollama (LOCAL)...", flush=True)
+            t_ollama_start = time.perf_counter()
+            reply = llm_ollama.generate_ollama(
+                prompt=text,
+                model=args.ollama_model,
+                system=system,
+                url=args.ollama_url,
+                num_predict=args.ollama_num_predict,
+                temperature=args.ollama_temperature,
+                stop=["\n"],
+                keep_alive=args.ollama_keep_alive,
+                num_thread=args.ollama_num_thread,
+                num_ctx=args.ollama_num_ctx,
+                num_batch=args.ollama_num_batch,
+                max_sentences=2,
+                max_words=36,
+                timeout=20,
+            )
+            t_ollama_end = time.perf_counter()
+            print(f"[time] ollama(local): {t_ollama_end - t_ollama_start:.2f}s", flush=True)
+
+    tts_text = reply.strip() if reply and not reply.startswith("(") else text
+    if reply:
+        print(f"[LLM-{route_mode}] {reply}", flush=True)
+
+    t2b = time.perf_counter()
+    print("Synthesizing...", flush=True)
+    try:
+        tts_audio, tts_sr = tts_kokoro.synthesize_kokoro(tts, tts_text, voice)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[error] TTS failed: {exc}", file=sys.stderr)
+        return
+    t3 = time.perf_counter()
+    print(f"[time] synthesize: {t3 - t2b:.2f}s", flush=True)
+    if args.trim_start > 0.0:
+        tts_audio = audio_io.trim_start_seconds(tts_audio, tts_sr, args.trim_start)
+    print("Playing...", flush=True)
+    try:
+        audio_io.play_audio(tts_audio, tts_sr, args.output_device, volume=args.volume)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[error] playback failed: {exc}", file=sys.stderr)
+    t4 = time.perf_counter()
+    print(f"[time] play: {t4 - t3:.2f}s (total: {t4 - t0:.2f}s)", flush=True)
+
+
 def main(argv: Optional[Iterable[str]] = None) -> int:
     args = stt_tts_cli.parse_args(argv)
     if not 0.0 <= args.volume <= 1.0:
@@ -223,26 +351,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     print(f"- trim-start: {args.trim_start}s")
     print(f"- record seconds: {args.record_seconds}")
 
-    onnx_model, onnx_tokenizer = None, None
-    if args.onnx_llm:
-        print(f"- onnx-llm: {args.onnx_model}")
-        print("Loading ONNX LLM...", flush=True)
-        try:
-            onnx_model, onnx_tokenizer = llm_onnx._load_onnx_llm(args.onnx_model)
-            if onnx_model is not None and onnx_tokenizer is not None:
-                try:
-                    _ = llm_onnx.generate_onnx_llm(
-                        "Hi", text_utils.ONNX_DEFAULT_SYSTEM, onnx_model, onnx_tokenizer,
-                        max_new_tokens=1, temperature=0.0,
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-                print("ONNX LLM ready.", flush=True)
-            else:
-                print("[warn] ONNX LLM load failed; install optimum[onnxruntime] and ensure model has onnx/ subfolder.", file=sys.stderr)
-        except Exception as e:  # noqa: BLE001
-            print(f"[warn] ONNX LLM preload failed: {e}", file=sys.stderr)
-    elif args.ollama:
+    # LOCAL LLM (Ollama) warmup if enabled
+    if args.ollama:
         print(f"- ollama: {args.ollama_model} @ {args.ollama_url}")
         print(f"- ollama-stream: {args.ollama_stream} (async: {args.ollama_stream_async}, max-words/chunk: {args.ollama_stream_max_words})")
         print("Preloading Ollama model...", flush=True)
@@ -268,6 +378,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
     stt_tts_cli.print_config(args, voice)
     print("Press Enter to record, or Ctrl+C to quit.")
+
+    # Emotion classifier (ONNX BERT) – optional, controlled by ENABLE_EMOTION
+    emotion_classifier: Optional[EmotionClassifierONNX] = None
+    if ENABLE_EMOTION:
+        model_dir = Path(__file__).resolve().parent.parent / "emotion_onnx_int8"
+        emotion_classifier = EmotionClassifierONNX(str(model_dir))
+        if not getattr(emotion_classifier, "available", False):
+            emotion_classifier = None
 
     while True:
         try:
@@ -312,12 +430,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
         print(f"[ASR] {text}")
 
-        if args.onnx_llm and onnx_model is not None and onnx_tokenizer is not None:
-            _run_turn_onnx_llm(t0, args, text, tts, voice, onnx_model, onnx_tokenizer)
-        elif args.ollama and args.ollama_stream:
-            _run_turn_ollama_stream(t0, args, text, tts, voice)
-        else:
-            _run_turn_ollama_or_direct(t0, args, text, tts, voice)
+        _run_turn_brain(t0, args, text, tts, voice, emotion_classifier)
 
         print("Done. Press Enter to record again.", flush=True)
         gc.collect()
