@@ -16,7 +16,7 @@ else:
 
 
 def _init_recognizer() -> Optional[object]:
-    """Lazy-initialize sherpa-onnx OfflineRecognizer (transducer, offline).
+    """Lazy-initialize sherpa-onnx OnlineRecognizer (streaming transducer).
 
     Expects model files under:
 
@@ -43,17 +43,26 @@ def _init_recognizer() -> Optional[object]:
         return None
 
     try:
-        # Use convenience constructor for transducer offline models.
-        recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(  # type: ignore[attr-defined]
+        recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(  # type: ignore[attr-defined]
+            tokens=str(tokens),
             encoder=str(encoder),
             decoder=str(decoder),
             joiner=str(joiner),
-            tokens=str(tokens),
             num_threads=1,
+            provider="cpu",
             sample_rate=16000,
             feature_dim=80,
             decoding_method="greedy_search",
-            debug=False,
+            max_active_paths=4,
+            lm="",
+            lm_scale=0.0,
+            lodr_fst="",
+            lodr_scale=0.0,
+            hotwords_file="",
+            hotwords_score=1.5,
+            modeling_unit="",
+            bpe_vocab="",
+            blank_penalty=0.0,
         )
     except Exception as exc:  # pragma: no cover
         print(f"[sherpa] Failed to init recognizer: {exc}", flush=True)
@@ -64,7 +73,7 @@ def _init_recognizer() -> Optional[object]:
 
 
 def transcribe_sherpa(audio: np.ndarray, sample_rate: int) -> str:
-    """Transcribe a single utterance using sherpa-onnx OfflineRecognizer.
+    """Transcribe a single utterance using sherpa-onnx OnlineRecognizer.
 
     Falls back to empty string if recognizer is not available.
     """
@@ -77,9 +86,21 @@ def transcribe_sherpa(audio: np.ndarray, sample_rate: int) -> str:
     try:
         stream = recognizer.create_stream()  # type: ignore[attr-defined]
         stream.accept_waveform(sample_rate, wav)  # type: ignore[attr-defined]
-        # OfflineRecognizer decodes batches of streams; we pass a single one.
-        recognizer.decode_streams([stream])  # type: ignore[attr-defined]
-        result = stream.result  # type: ignore[attr-defined]
+
+        # Add a small tail padding and mark end of input (mimic examples)
+        tail = np.zeros(int(0.66 * sample_rate), dtype=np.float32)
+        stream.accept_waveform(sample_rate, tail)  # type: ignore[attr-defined]
+        stream.input_finished()  # type: ignore[attr-defined]
+
+        # Decode until no streams are ready
+        pending = [stream]
+        while True:
+            ready = [s for s in pending if recognizer.is_ready(s)]  # type: ignore[attr-defined]
+            if not ready:
+                break
+            recognizer.decode_streams(ready)  # type: ignore[attr-defined]
+
+        result = recognizer.get_result(stream)  # type: ignore[attr-defined]
         text = getattr(result, "text", "") or ""
         return text.strip()
     except Exception as exc:  # pragma: no cover
