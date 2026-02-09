@@ -83,7 +83,7 @@ On the Raspberry Pi, you can create it with a one-time download script:
 
 ```bash
 source venv/bin/activate
-python download_emotion_model.py
+python download_model.py
 ```
 
 This will download:
@@ -105,3 +105,24 @@ emotion_onnx_int8/
 ```
 
 The first run requires network access to HuggingFace; after that, the directory can be reused offline.
+
+## Kokoro TTS model files
+
+The Kokoro ONNX TTS model and voices are also **not stored in git**.  
+On the Raspberry Pi, they are downloaded by the same helper script:
+
+```bash
+source venv/bin/activate
+python download_model.py
+```
+
+This will additionally create:
+
+```text
+models/
+  kokoro/
+    voices-v1.0.bin
+    model_quantized.onnx
+```
+
+using the official `kokoro-onnx` GitHub release URLs. After this, `python -m Demo` can use Kokoro for TTS.
