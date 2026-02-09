@@ -173,13 +173,28 @@ def transcribe_sherpa(audio: np.ndarray, sample_rate: int) -> str:
 
         chunk_size = int(CHUNK_SECONDS * sample_rate)
         offset = 0
+        chunk_count = 0
         while offset < len(wav):
             end = min(offset + chunk_size, len(wav))
             chunk = wav[offset:end]
             stream.accept_waveform(sample_rate, chunk)
+            
+            decode_count = 0
             while recognizer.is_ready(stream):
                 recognizer.decode_stream(stream)
+                decode_count += 1
+            
+            chunk_count += 1
+            # Log partial result every 10 chunks (~1 second)
+            if chunk_count % 10 == 0:
+                partial_result = recognizer.get_result(stream)
+                partial_text = getattr(partial_result, "text", "") or ""
+                if partial_text:
+                    print(f"[sherpa-debug] partial @{chunk_count}chunks: {repr(partial_text)}", flush=True)
+            
             offset = end
+
+        print(f"[sherpa] processed {chunk_count} chunks, finalizing...", flush=True)
 
         # Append a short silence tail and signal end-of-stream.
         tail = np.zeros(int(0.3 * sample_rate), dtype=np.float32)
@@ -223,6 +238,7 @@ def stream_recognize_until_endpoint(
 
     print("[sherpa] Listening... (speak now, endpoint will auto-detect)", flush=True)
 
+    last_logged_text = ""
     try:
         with sd.InputStream(
             samplerate=SAMPLE_RATE,
@@ -247,10 +263,17 @@ def stream_recognize_until_endpoint(
                 result = recognizer.get_result(stream)
                 current_text = getattr(result, "text", "") or ""
 
-                if is_endpoint and current_text.strip():
+                # Debug: log partial results when they change
+                if current_text and current_text != last_logged_text:
+                    print(f"[sherpa-debug] partial: {repr(current_text)}", flush=True)
+                    last_logged_text = current_text
+
+                if is_endpoint:
                     text = current_text.strip()
-                    print(f"[sherpa] endpoint detected: {repr(text)}", flush=True)
-                    recognizer.reset(stream)
+                    if text:
+                        print(f"[sherpa] endpoint detected: {repr(text)}", flush=True)
+                    else:
+                        print("[sherpa] endpoint detected but text is empty", flush=True)
                     break
     except Exception as exc:  # pragma: no cover
         print(f"[sherpa] stream_recognize error: {exc}", flush=True)
@@ -267,6 +290,8 @@ def stream_recognize_until_endpoint(
                 recognizer.decode_stream(stream)
             result = recognizer.get_result(stream)
             text = (getattr(result, "text", "") or "").strip()
+            if text:
+                print(f"[sherpa] finalized text: {repr(text)}", flush=True)
         except Exception:
             pass
 
