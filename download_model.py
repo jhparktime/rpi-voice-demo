@@ -57,14 +57,14 @@ SHERPA_ASR_ARCHIVE_URL = (
 )
 SHERPA_ASR_ARCHIVE_NAME = "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2"
 
-# sherpa-onnx TTS: English VITS model matching the previous Raspberry Pi
-# setup (vits-coqui-en-ljspeech) plus a shared espeak-ng-data bundle.
 SHERPA_TTS_ARCHIVE_URL = (
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/"
-    "vits-coqui-en-ljspeech.tar.bz2"
+    "vits-piper-en_US-amy-low.tar.bz2"
 )
-SHERPA_TTS_ARCHIVE_NAME = "vits-coqui-en-ljspeech.tar.bz2"
+SHERPA_TTS_ARCHIVE_NAME = "vits-piper-en_US-amy-low.tar.bz2"
 
+# (참고) Piper 모델은 espeak-ng-data가 모델 압축파일 안에 포함된 경우가 많지만,
+# 기존 로직과의 호환성을 위해 아래 data 파일은 그대로 둬도 무방합니다.
 ESPEAK_DATA_ARCHIVE_URL = (
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/"
     "espeak-ng-data.tar.bz2"
