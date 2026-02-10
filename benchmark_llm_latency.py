@@ -162,7 +162,7 @@ def main():
         if has_gemini:
             print("[Gemini] API key found")
             print("[Gemini] Free tier limits: 15 RPM, 1M TPM, 1500 RPD")
-            print("[Gemini] Strategy: Interleave with Ollama calls to avoid rate limits")
+            print("[Gemini] Strategy: Interleave with Ollama + enforce 4s minimum interval")
         elif has_openai:
             print("[OpenAI] API key found")
         elif has_cloud:
@@ -197,6 +197,10 @@ def main():
         "gemini": {},
     }
     
+    # Rate limit management for Gemini (15 RPM = 4 seconds per request)
+    GEMINI_MIN_INTERVAL = 4.0  # seconds
+    last_gemini_call_time: Optional[float] = None
+    
     # Run benchmarks
     for query in TEST_QUERIES:
         print(f"\n{'─'*70}")
@@ -230,7 +234,18 @@ def main():
             
             # Gemini (interleaved after Ollama to avoid rate limits)
             if not args.ollama_only and (has_gemini or has_openai or has_cloud):
+                # Rate limit management: ensure at least 4 seconds between Gemini calls
+                if last_gemini_call_time is not None:
+                    time_since_last = time.perf_counter() - last_gemini_call_time
+                    if time_since_last < GEMINI_MIN_INTERVAL:
+                        wait_time = GEMINI_MIN_INTERVAL - time_since_last
+                        print(f"  [Rate limit] Waiting {wait_time:.1f}s before next Gemini call...")
+                        time.sleep(wait_time)
+                
+                call_start = time.perf_counter()
                 latency, response = benchmark_gemini(query["prompt"])
+                last_gemini_call_time = time.perf_counter()
+                
                 gemini_latencies.append(latency)
                 gemini_responses.append(response)
                 
