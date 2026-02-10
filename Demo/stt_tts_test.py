@@ -310,9 +310,11 @@ def _generate_filler_ollama(
 ) -> str:
     """Generate short Ollama filler phrase for Cloud waiting period.
     
-    Returns empty string if Ollama unavailable or generation fails.
+    Returns empty string if Ollama unavailable, filler disabled, or generation fails.
     """
-    if not args.ollama:
+    # Check if filler is enabled (CLI flag or env var)
+    filler_enabled = getattr(args, 'cloud_filler', ENABLE_CLOUD_FILLER)
+    if not filler_enabled or not args.ollama:
         return ""
     
     system = text_utils.build_cloud_filler_system_prompt(emotion_label)
@@ -853,6 +855,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     if args.ollama:
         print(f"- ollama: {args.ollama_model} @ {args.ollama_url}")
         print(f"- ollama-stream: {args.ollama_stream} (async: {args.ollama_stream_async}, max-words/chunk: {args.ollama_stream_max_words})")
+        filler_enabled = getattr(args, 'cloud_filler', ENABLE_CLOUD_FILLER)
+        print(f"- cloud-filler: {'enabled' if filler_enabled else 'disabled'} (Ollama bridge during Cloud LLM latency)")
 
     stt_tts_cli.print_config(args, voice)
 

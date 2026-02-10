@@ -64,6 +64,10 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument("--ollama-stream-max-words", type=int, default=12, help="Max words per chunk when no sentence end (stream mode).")
     parser.add_argument("--ollama-stream-async", action="store_true", default=True, help="Overlap synth and play for seamless TTS (default).")
     parser.add_argument("--no-ollama-stream-async", action="store_false", dest="ollama_stream_async", help="Stream TTS sequential (synth then play per chunk).")
+    
+    # --- Cloud Filler ---
+    parser.add_argument("--cloud-filler", action="store_true", default=True, help="Use Ollama filler during Cloud LLM latency (default).")
+    parser.add_argument("--no-cloud-filler", action="store_false", dest="cloud_filler", help="Disable filler; wait silently for Cloud LLM.")
 
     # --- ONNX LLM ---
     parser.add_argument("--onnx-llm", action="store_true", help="Use ONNX LLM instead of Ollama (e.g. SmolLM2-135M-Instruct); no streaming, single TTS.")
@@ -101,6 +105,7 @@ def print_config(args: argparse.Namespace, voice: str) -> None:
         "ollama_stream",
         "ollama_stream_async",
         "ollama_stream_max_words",
+        "cloud_filler",
         "onnx_llm",
         "onnx_model",
         "onnx_max_new_tokens",
