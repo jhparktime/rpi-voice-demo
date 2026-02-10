@@ -907,21 +907,6 @@ def _warmup(args: Any, emotion_classifier: Optional[EmotionClassifierONNX]) -> N
         except Exception as exc:  # noqa: BLE001
             print(f"[Warmup] Ollama warning: {exc}", file=sys.stderr)
     
-    # 6. Cloud LLM (if configured: OpenAI, Gemini, or custom URL)
-    openai_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
-    gemini_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
-    cloud_url = (os.environ.get("CLOUD_LLM_URL") or "").strip()
-    if openai_key or gemini_key or cloud_url:
-        print("[Warmup] Testing cloud LLM connection...", flush=True)
-        try:
-            _ = cloud_llm.call_cloud_llm(
-                prompt="Warmup request.",
-                system="You are a friendly, reliable assistant. This is a warmup call; a short reply is fine.",
-                timeout=5.0,
-            )
-        except Exception as exc:  # noqa: BLE001
-            print(f"[Warmup] Cloud LLM warning: {exc}", file=sys.stderr)
-    
     print("[Warmup] All modules ready!", flush=True)
 
 

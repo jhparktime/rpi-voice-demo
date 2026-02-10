@@ -73,14 +73,14 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--cloud-max-sentences",
         type=int,
-        default=2,
-        help="Max sentences for Cloud LLM reply (default 2).",
+        default=5,
+        help="Max sentences for Cloud LLM reply (default 5).",
     )
     parser.add_argument(
         "--cloud-max-words",
         type=int,
-        default=60,
-        help="Approximate max words for Cloud LLM reply after postprocessing (default 60).",
+        default=120,
+        help="Approximate max words for Cloud LLM reply after postprocessing (default 120).",
     )
     parser.add_argument(
         "--cloud-tts-max-words-per-chunk",
