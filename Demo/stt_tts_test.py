@@ -338,24 +338,14 @@ def _run_turn_brain(
                     print(f"[error] TTS filler failed: {exc}", file=sys.stderr)
             return None, None
 
-        def _generate_cloud_main() -> Tuple[str, Optional[np.ndarray], Optional[int]]:
-            """Thread 2: Call Cloud LLM + TTS."""
+        def _generate_cloud_main() -> str:
+            """Thread 2: Call Cloud LLM (text only, TTS done in main thread)."""
             system = text_utils.build_cloud_system_prompt(emotion_label)
             reply = cloud_llm.call_cloud_llm(prompt=llm_prompt, system=system, timeout=20.0)
             tts_text = reply.strip() if reply and not reply.startswith("(Cloud LLM") else text
             if reply:
                 print(f"[LLM-CLOUD] {reply}", flush=True)
-
-            t2b = time.perf_counter()
-            print("Synthesizing (cloud)...", flush=True)
-            try:
-                cloud_audio, cloud_sr = _synthesize_tts(tts, voice, tts_text)
-                t3 = time.perf_counter()
-                print(f"[time] synthesize(cloud): {t3 - t2b:.2f}s", flush=True)
-                return tts_text, cloud_audio, cloud_sr
-            except Exception as exc:  # noqa: BLE001
-                print(f"[error] TTS failed: {exc}", file=sys.stderr)
-                return tts_text, None, None
+            return tts_text
 
         # Execute both threads in parallel
         print("[Cloud] Starting parallel: filler + cloud LLM...", flush=True)
@@ -374,21 +364,49 @@ def _run_turn_brain(
                 except Exception as exc:  # noqa: BLE001
                     print(f"[error] playback filler failed: {exc}", file=sys.stderr)
             
-            # Wait for cloud
-            tts_text, cloud_audio, cloud_sr = cloud_future.result()
-            assistant_reply = tts_text
-
-        # Play cloud (blocking)
-        if cloud_audio is not None and cloud_sr is not None:
-            if args.trim_start > 0.0:
-                cloud_audio = audio_io.trim_start_seconds(cloud_audio, cloud_sr, args.trim_start)
-            print("Playing (cloud)...", flush=True)
+            # Wait for cloud text
+            cloud_text = cloud_future.result()
+            assistant_reply = cloud_text
+        
+        # Split cloud text into sentence chunks for streaming TTS
+        chunks = text_utils.split_into_chunks(cloud_text)
+        if not chunks:
+            # Fallback: treat whole text as single chunk
+            chunks = [cloud_text]
+        
+        print(f"[Cloud] Streaming {len(chunks)} chunk(s)...", flush=True)
+        
+        # Process chunks: TTS + play each sequentially (blocking)
+        for i, chunk in enumerate(chunks):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            
+            # TTS this chunk
+            t_chunk_start = time.perf_counter()
             try:
-                audio_io.play_audio(cloud_audio, cloud_sr, args.output_device, volume=args.volume)
+                chunk_audio, chunk_sr = _synthesize_tts(tts, voice, chunk)
             except Exception as exc:  # noqa: BLE001
-                print(f"[error] playback failed: {exc}", file=sys.stderr)
+                print(f"[error] TTS chunk {i+1} failed: {exc}", file=sys.stderr)
+                continue
+            
+            t_chunk_tts = time.perf_counter()
+            
+            # Play this chunk (blocking)
+            if args.trim_start > 0.0 and i == 0:
+                chunk_audio = audio_io.trim_start_seconds(chunk_audio, chunk_sr, args.trim_start)
+            
+            print(f"Playing chunk {i+1}/{len(chunks)}...", flush=True)
+            try:
+                audio_io.play_audio(chunk_audio, chunk_sr, args.output_device, volume=args.volume)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[error] playback chunk {i+1} failed: {exc}", file=sys.stderr)
+            
+            t_chunk_end = time.perf_counter()
+            print(f"[time] chunk-{i+1}: TTS={t_chunk_tts - t_chunk_start:.2f}s, total={t_chunk_end - t_chunk_start:.2f}s", flush=True)
+        
         t4 = time.perf_counter()
-        print(f"[time] play(cloud): {t4 - t0:.2f}s (total: {t4 - t0:.2f}s)", flush=True)
+        print(f"[time] total: {t4 - t0:.2f}s", flush=True)
         return assistant_reply
 
     # ── LOCAL path ──────────────────────────────────────────────────────
@@ -556,8 +574,8 @@ def _run_turn_brain_sentence(
                     print(f"[error] TTS filler failed: {exc}", file=sys.stderr)
             return None, None
 
-        def _generate_cloud() -> Tuple[str, Optional[np.ndarray], Optional[int]]:
-            """Thread 2: Call Cloud LLM + TTS."""
+        def _generate_cloud() -> str:
+            """Thread 2: Call Cloud LLM (text only, TTS done in main thread)."""
             system = text_utils.build_cloud_system_prompt(emotion_label)
             reply = cloud_llm.call_cloud_llm(
                 prompt=llm_prompt,
@@ -567,17 +585,7 @@ def _run_turn_brain_sentence(
             tts_text = reply.strip() if reply and not reply.startswith("(Cloud LLM") else text
             if reply:
                 print(f"[LLM-CLOUD] {reply}", flush=True)
-
-            t2b = time.perf_counter()
-            print("Synthesizing (cloud)...", flush=True)
-            try:
-                cloud_audio, cloud_sr = _synthesize_tts(tts, voice, tts_text)
-            except Exception as exc:  # noqa: BLE001
-                print(f"[error] TTS failed: {exc}", file=sys.stderr)
-                return tts_text, None, None
-            t3 = time.perf_counter()
-            print(f"[time] synthesize(cloud): {t3 - t2b:.2f}s", flush=True)
-            return tts_text, cloud_audio, cloud_sr
+            return tts_text
 
         # Execute both threads in parallel
         print("[Cloud] Starting parallel: filler + cloud LLM...", flush=True)
@@ -596,16 +604,63 @@ def _run_turn_brain_sentence(
                     filler_audio, filler_sr, args.output_device, volume=args.volume
                 )
             
-            # Wait for cloud
-            tts_text, cloud_audio, cloud_sr = cloud_future.result()
+            # Wait for cloud text
+            cloud_text = cloud_future.result()
+        
+        # Split cloud text into sentence chunks for streaming TTS
+        chunks = text_utils.split_into_chunks(cloud_text)
+        if not chunks:
+            # Fallback: treat whole text as single chunk
+            chunks = [cloud_text]
+        
+        print(f"[Cloud] Streaming {len(chunks)} chunk(s)...", flush=True)
+        
+        # Process chunks: TTS + play each sequentially
+        combined_audio_chunks = []
+        sample_rate = None
+        
+        for i, chunk in enumerate(chunks):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
             
-            # Wait for filler to finish before returning
-            if filler_player and filler_player.is_playing():
+            # TTS this chunk
+            t_chunk_start = time.perf_counter()
+            try:
+                chunk_audio, chunk_sr = _synthesize_tts(tts, voice, chunk)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[error] TTS chunk {i+1} failed: {exc}", file=sys.stderr)
+                continue
+            
+            if sample_rate is None:
+                sample_rate = chunk_sr
+            
+            t_chunk_tts = time.perf_counter()
+            
+            # For first chunk: wait for filler to finish
+            if i == 0 and filler_player and filler_player.is_playing():
                 print("[Cloud] Waiting for filler to finish...", flush=True)
                 filler_player.wait()
+            
+            # Play this chunk (blocking)
+            if args.trim_start > 0.0 and i == 0:
+                chunk_audio = audio_io.trim_start_seconds(chunk_audio, chunk_sr, args.trim_start)
+            
+            print(f"Playing chunk {i+1}/{len(chunks)}...", flush=True)
+            audio_io.play_audio(chunk_audio, chunk_sr, args.output_device, volume=args.volume)
+            
+            t_chunk_end = time.perf_counter()
+            print(f"[time] chunk-{i+1}: TTS={t_chunk_tts - t_chunk_start:.2f}s, total={t_chunk_end - t_chunk_start:.2f}s", flush=True)
+            
+            # Collect audio for return value (combined)
+            combined_audio_chunks.append(chunk_audio)
         
-        # Return cloud audio only (filler already played)
-        return tts_text, cloud_audio, cloud_sr
+        # Combine all chunks into single audio array for return
+        if combined_audio_chunks and sample_rate:
+            combined_audio = np.concatenate(combined_audio_chunks)
+            return cloud_text, combined_audio, sample_rate
+        else:
+            return cloud_text, None, None
 
     # ── LOCAL path ──────────────────────────────────────────────────────────
     system = text_utils.build_local_system_prompt(emotion_label)

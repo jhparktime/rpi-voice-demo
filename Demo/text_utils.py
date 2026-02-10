@@ -45,6 +45,46 @@ def postprocess_output(text: str, max_sentences: int, max_words: int) -> str:
     return s.strip()
 
 
+def split_into_chunks(text: str) -> List[str]:
+    """Split text into sentence chunks for streaming TTS.
+    
+    Uses regex to split on sentence boundaries (. ! ?) while preserving punctuation.
+    Handles common abbreviations like "Dr.", "Mr.", "Mrs." to avoid false splits.
+    
+    Returns:
+        List of sentence strings (each including its punctuation).
+        Empty strings are filtered out.
+    """
+    if not text or not text.strip():
+        return []
+    
+    # Normalize whitespace
+    text = re.sub(r'\s+', ' ', text.strip())
+    
+    # Split on sentence boundaries while capturing the punctuation
+    # Use lookahead to avoid splitting on common abbreviations
+    # Pattern: split after .!? followed by space (or end), but not after common abbreviations
+    parts = re.split(r'(?<!\bDr)(?<!\bMr)(?<!\bMrs)(?<!\bMs)(?<!\bProf)([.!?]+)\s+', text)
+    
+    # Combine text with its punctuation
+    chunks = []
+    i = 0
+    while i < len(parts):
+        if i + 1 < len(parts) and parts[i+1] in ['.', '!', '?', '..', '...', '!?', '?!']:
+            # Combine text with punctuation
+            chunk = parts[i] + parts[i+1]
+            chunks.append(chunk.strip())
+            i += 2
+        else:
+            # Text without captured punctuation (last chunk or already has punctuation)
+            if parts[i].strip():
+                chunks.append(parts[i].strip())
+            i += 1
+    
+    # Filter empty chunks and return
+    return [c for c in chunks if c]
+
+
 OLLAMA_DEFAULT_SYSTEM = (
     "You are a warm, supportive friend. Reply in English in 1-2 short sentences. "
     "No emojis, no lists. Sound natural and spoken."
@@ -101,19 +141,27 @@ def build_cloud_filler_system_prompt(emotion_label: str | None) -> str:
     """CLOUD filler prompt for LOCAL sLLM: brief spoken bridge, no answering."""
     emo_hint = f"\nEmotionHint: {emotion_label}" if emotion_label else ""
     return (
-        "Reply with EXACTLY one of these short bridge phrases:\n"
+        "Generate a SHORT bridge phrase (under 10 words) while I process your request.\n"
+        "Examples (feel free to vary naturally):\n"
         "- 'Let me check that for you.'\n"
         "- 'Give me a second, I'll look that up.'\n"
         "- 'Let me find that out.'\n"
         "- 'One moment, let me check.'\n"
+        "- 'Hmm, let me see...'\n"
+        "- 'Looking that up now.'\n"
+        "- 'Just a sec, checking...'\n"
+        "- 'Alright, let me pull that info.'\n"
+        "- 'Hang on, searching for that.'\n"
+        "- 'Give me a moment here.'\n"
+        "- 'Let me grab that for you.'\n"
+        "- 'One sec, finding that.'\n"
         "\n"
         "CRITICAL RULES:\n"
+        "- Keep it under 10 words\n"
         "- DO NOT answer the question\n"
-        "- DO NOT apologize\n"
-        "- DO NOT explain limitations ('I don't have access to...', 'as a chatbot...', etc.)\n"
-        "- DO NOT add extra sentences\n"
-        "- ONLY say you'll check/look it up\n"
-        "- Keep it under 10 words"
+        "- DO NOT apologize or explain limitations\n"
+        "- Just a quick bridge phrase, not an answer\n"
+        "- Sound natural and conversational"
         f"{emo_hint}"
     )
 
