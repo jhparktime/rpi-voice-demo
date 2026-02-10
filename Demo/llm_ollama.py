@@ -57,10 +57,25 @@ def generate_ollama(
     try:
         res = requests.post(url, json=payload, timeout=timeout)
         if res.status_code != 200:
+            # Lightweight debug for troubleshooting Ollama issues (e.g., filler empty/error)
+            print(
+                f"[Ollama] HTTP {res.status_code} for model={model!r}, prompt_prefix={prompt[:40]!r}",
+                flush=True,
+            )
             return f"(Ollama error: HTTP {res.status_code})"
         data = res.json()
         out = (data.get("response") or "").strip()
-        return text_utils.postprocess_output(out, max_sentences=max_sentences, max_words=max_words)
+        if not out:
+            # Helps debug cases like filler returning empty/error
+            print(
+                f"[Ollama] Empty 'response' field for model={model!r}, prompt_prefix={prompt[:40]!r}",
+                flush=True,
+            )
+        return text_utils.postprocess_output(
+            out,
+            max_sentences=max_sentences,
+            max_words=max_words,
+        )
     except requests.exceptions.Timeout:
         return "(Ollama error: timeout)"
     except Exception as e:

@@ -429,73 +429,105 @@ def _run_turn_brain(
         print("\n" + "="*60)
         print("[CLOUD MODE] Starting (with Ollama filler)...")
         print("="*60 + "\n", flush=True)
-        
+
         system = text_utils.build_cloud_system_prompt(emotion_label)
-        
+
         # Parallel: Ollama filler + Cloud LLM
         def _call_filler():
             return _generate_filler_ollama(args, emotion_label, timeout=3.0)
-        
+
         def _call_cloud():
             return cloud_llm.call_cloud_llm(
                 prompt=llm_prompt,
                 system=system,
                 timeout=20.0,
             )
-        
+
         t_parallel_start = time.perf_counter()
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with ThreadPoolExecutor(max_workers=3) as executor:
             fut_filler = executor.submit(_call_filler)
             fut_cloud = executor.submit(_call_cloud)
-            
+
             filler_text = fut_filler.result()
             t_filler_ready = time.perf_counter()
-            
-            # Play filler immediately if available
-            filler_player = None
+
+            # Filler TTS+재생을 별도 스레드에서 실행
+            filler_player: Optional[audio_io.AudioPlayer] = None
+            fut_filler_tts: Optional[concurrent.futures.Future] = None
             if filler_text:
                 print(f"[FILLER] {filler_text}")
-                print(f"[LATENCY] Filler generation: {t_filler_ready - t_parallel_start:.2f}s\n", flush=True)
-                try:
-                    filler_audio, filler_sr = _synthesize_tts(tts, voice, filler_text)
-                    filler_player = audio_io.AudioPlayer(
-                        filler_audio, filler_sr, 
-                        device=args.output_device, 
-                        volume=args.volume
-                    )
-                    filler_player.start()
-                    print("[FILLER] Playing...", flush=True)
-                except Exception as exc:  # noqa: BLE001
-                    print(f"[FILLER] TTS/playback failed: {exc}", flush=True, file=sys.stderr)
-                    filler_player = None
-            
-            # Wait for Cloud result
+                print(
+                    f"[LATENCY] Filler generation: {t_filler_ready - t_parallel_start:.2f}s\n",
+                    flush=True,
+                )
+
+                def _run_filler_tts() -> Optional[audio_io.AudioPlayer]:
+                    t_tts_start = time.perf_counter()
+                    try:
+                        filler_audio, filler_sr = _synthesize_tts(tts, voice, filler_text)
+                        t_tts_end = time.perf_counter()
+                        print(
+                            f"[LATENCY] Filler TTS: {t_tts_end - t_tts_start:.2f}s",
+                            flush=True,
+                        )
+                        player = audio_io.AudioPlayer(
+                            filler_audio,
+                            filler_sr,
+                            device=args.output_device,
+                            volume=args.volume,
+                        )
+                        player.start()
+                        print("[FILLER] Playing...", flush=True)
+                        return player
+                    except Exception as exc:  # noqa: BLE001
+                        print(
+                            f"[FILLER] TTS/playback failed: {exc}",
+                            flush=True,
+                            file=sys.stderr,
+                        )
+                        return None
+
+                fut_filler_tts = executor.submit(_run_filler_tts)
+
+            # Wait for Cloud result (병렬로 Filler TTS 수행 중)
             cloud_reply = fut_cloud.result()
             t_cloud_ready = time.perf_counter()
-        
+
+            # Filler TTS 완료 후 player 핸들을 받아온다 (재생은 이미 시작됨)
+            if fut_filler_tts is not None:
+                try:
+                    filler_player = fut_filler_tts.result()
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        f"[FILLER] TTS future failed: {exc}",
+                        flush=True,
+                        file=sys.stderr,
+                    )
+                    filler_player = None
+
         print(f"[LATENCY] Cloud LLM call: {t_cloud_ready - t_parallel_start:.2f}s")
-        
+
         cloud_text = cloud_reply.strip() if cloud_reply and not cloud_reply.startswith("(") else text
         assistant_reply = cloud_text
-        
+
         if cloud_reply:
             print(f"[LLM-CLOUD] {cloud_reply}\n", flush=True)
-        
+
         # Split and play with pipelined TTS
         chunks = text_utils.split_into_chunks(cloud_text)
         if not chunks:
             chunks = [cloud_text]
-        
+
         print(f"[CLOUD] Streaming {len(chunks)} chunk(s)...\n", flush=True)
-        
+
         t_tts_start = time.perf_counter()
         _, _ = _play_chunks_pipelined(chunks, tts, voice, args, filler_player=filler_player)
         t_tts_end = time.perf_counter()
-        
+
         print(f"\n[LATENCY] Total TTS+Play: {t_tts_end - t_tts_start:.2f}s")
         print(f"[LATENCY] End-to-end: {t_tts_end - t0:.2f}s")
         print("="*60 + "\n", flush=True)
-        
+
         return assistant_reply
 
     # ── LOCAL path ──────────────────────────────────────────────────────
@@ -625,71 +657,103 @@ def _run_turn_brain_sentence(
         print("\n" + "="*60)
         print("[CLOUD MODE] Starting (with Ollama filler)...")
         print("="*60 + "\n", flush=True)
-        
+
         system = text_utils.build_cloud_system_prompt(emotion_label)
-        
+
         # Parallel: Ollama filler + Cloud LLM
         def _call_filler():
             return _generate_filler_ollama(args, emotion_label, timeout=3.0)
-        
+
         def _call_cloud():
             return cloud_llm.call_cloud_llm(
                 prompt=llm_prompt,
                 system=system,
                 timeout=10.0,
             )
-        
+
         t_parallel_start = time.perf_counter()
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with ThreadPoolExecutor(max_workers=3) as executor:
             fut_filler = executor.submit(_call_filler)
             fut_cloud = executor.submit(_call_cloud)
-            
+
             filler_text = fut_filler.result()
             t_filler_ready = time.perf_counter()
-            
-            # Play filler immediately if available
-            filler_player = None
+
+            # Filler TTS+재생을 별도 스레드에서 실행
+            filler_player: Optional[audio_io.AudioPlayer] = None
+            fut_filler_tts: Optional[concurrent.futures.Future] = None
             if filler_text:
                 print(f"[FILLER] {filler_text}")
-                print(f"[LATENCY] Filler generation: {t_filler_ready - t_parallel_start:.2f}s\n", flush=True)
-                try:
-                    filler_audio, filler_sr = _synthesize_tts(tts, voice, filler_text)
-                    filler_player = audio_io.AudioPlayer(
-                        filler_audio, filler_sr, 
-                        device=args.output_device, 
-                        volume=args.volume
-                    )
-                    filler_player.start()
-                    print("[FILLER] Playing...", flush=True)
-                except Exception as exc:  # noqa: BLE001
-                    print(f"[FILLER] TTS/playback failed: {exc}", flush=True, file=sys.stderr)
-                    filler_player = None
-            
-            # Wait for Cloud result
+                print(
+                    f"[LATENCY] Filler generation: {t_filler_ready - t_parallel_start:.2f}s\n",
+                    flush=True,
+                )
+
+                def _run_filler_tts() -> Optional[audio_io.AudioPlayer]:
+                    t_tts_start = time.perf_counter()
+                    try:
+                        filler_audio, filler_sr = _synthesize_tts(tts, voice, filler_text)
+                        t_tts_end = time.perf_counter()
+                        print(
+                            f"[LATENCY] Filler TTS: {t_tts_end - t_tts_start:.2f}s",
+                            flush=True,
+                        )
+                        player = audio_io.AudioPlayer(
+                            filler_audio,
+                            filler_sr,
+                            device=args.output_device,
+                            volume=args.volume,
+                        )
+                        player.start()
+                        print("[FILLER] Playing...", flush=True)
+                        return player
+                    except Exception as exc:  # noqa: BLE001
+                        print(
+                            f"[FILLER] TTS/playback failed: {exc}",
+                            flush=True,
+                            file=sys.stderr,
+                        )
+                        return None
+
+                fut_filler_tts = executor.submit(_run_filler_tts)
+
+            # Wait for Cloud result (병렬로 Filler TTS 수행 중)
             cloud_reply = fut_cloud.result()
             t_cloud_ready = time.perf_counter()
-        
+
+            # Filler TTS 완료 후 player 핸들을 받아온다 (재생은 이미 시작됨)
+            if fut_filler_tts is not None:
+                try:
+                    filler_player = fut_filler_tts.result()
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        f"[FILLER] TTS future failed: {exc}",
+                        flush=True,
+                        file=sys.stderr,
+                    )
+                    filler_player = None
+
         print(f"[LATENCY] Cloud LLM call: {t_cloud_ready - t_parallel_start:.2f}s")
-        
+
         cloud_text = cloud_reply.strip() if cloud_reply and not cloud_reply.startswith("(") else text
-        
+
         if cloud_reply:
             print(f"[LLM-CLOUD] {cloud_reply}\n", flush=True)
-        
+
         # Split and play with pipelined TTS
         chunks = text_utils.split_into_chunks(cloud_text)
         if not chunks:
             chunks = [cloud_text]
-        
+
         print(f"[CLOUD] Streaming {len(chunks)} chunk(s)...\n", flush=True)
-        
+
         t_tts_start = time.perf_counter()
         combined_audio_chunks, sample_rate = _play_chunks_pipelined(chunks, tts, voice, args, filler_player=filler_player)
         t_tts_end = time.perf_counter()
-        
+
         print(f"\n[LATENCY] Total TTS+Play: {t_tts_end - t_tts_start:.2f}s")
         print("="*60 + "\n", flush=True)
-        
+
         # Combine all chunks into single audio array for return
         if combined_audio_chunks and sample_rate:
             combined_audio = np.concatenate(combined_audio_chunks)
