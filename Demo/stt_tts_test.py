@@ -64,20 +64,21 @@ def _play_chunks_pipelined(
     voice: str,
     args: Any,
     filler_player: Optional[audio_io.AudioPlayer] = None,
-) -> List[np.ndarray]:
+) -> Tuple[List[np.ndarray], Optional[int]]:
     """Play text chunks with pipelined TTS to eliminate gaps.
     
     Producer thread generates TTS for all chunks in background.
     Main thread plays each chunk as soon as it's ready.
     First chunk waits for filler to finish.
     
-    Returns list of audio arrays for each chunk (for logging/debugging).
+    Returns (list of audio arrays, sample_rate).
     """
     if not chunks:
-        return []
+        return [], None
     
     tts_queue: Queue = Queue(maxsize=2)  # Buffer up to 2 chunks ahead
     audio_chunks = []
+    sample_rate = None
     
     def _tts_producer():
         """Background thread: TTS all chunks and push to queue."""
@@ -108,6 +109,10 @@ def _play_chunks_pipelined(
         
         chunk_idx, chunk_audio, chunk_sr = item
         
+        # Track sample rate from first chunk
+        if sample_rate is None:
+            sample_rate = chunk_sr
+        
         # First chunk: wait for filler to finish
         if first_chunk and filler_player and filler_player.is_playing():
             print("[Cloud] Waiting for filler to finish...", flush=True)
@@ -133,7 +138,7 @@ def _play_chunks_pipelined(
     # Wait for producer thread to finish
     producer.join(timeout=5.0)
     
-    return audio_chunks
+    return audio_chunks, sample_rate
 
 
 # ── Turn handlers (ONNX LLM, Ollama stream, Ollama single, Brain router) ──
@@ -457,7 +462,7 @@ def _run_turn_brain(
         print(f"[Cloud] Streaming {len(chunks)} chunk(s) with pipelined TTS...", flush=True)
         
         # Use pipelined TTS: no filler_player since filler already played (blocking)
-        _play_chunks_pipelined(chunks, tts, voice, args, filler_player=None)
+        _, _ = _play_chunks_pipelined(chunks, tts, voice, args, filler_player=None)
         
         t4 = time.perf_counter()
         print(f"[time] total: {t4 - t0:.2f}s", flush=True)
@@ -670,12 +675,10 @@ def _run_turn_brain_sentence(
         print(f"[Cloud] Streaming {len(chunks)} chunk(s) with pipelined TTS...", flush=True)
         
         # Use pipelined TTS with filler_player
-        combined_audio_chunks = _play_chunks_pipelined(chunks, tts, voice, args, filler_player)
+        combined_audio_chunks, sample_rate = _play_chunks_pipelined(chunks, tts, voice, args, filler_player)
         
         # Combine all chunks into single audio array for return
-        if combined_audio_chunks:
-            # Assume all chunks have same sample rate (sherpa-onnx TTS)
-            sample_rate = tts_sherpa.SAMPLE_RATE
+        if combined_audio_chunks and sample_rate:
             combined_audio = np.concatenate(combined_audio_chunks)
             return cloud_text, combined_audio, sample_rate
         else:
