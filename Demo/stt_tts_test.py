@@ -19,6 +19,7 @@ import os
 import sys
 import time
 import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Tuple
 
@@ -420,6 +421,142 @@ def _run_turn_brain(
     return assistant_reply
 
 
+def _run_turn_brain_sentence(
+    t0: float,
+    args: Any,
+    text: str,
+    tts: Any,
+    voice: str,
+    emotion_classifier: Optional[EmotionClassifierONNX],
+    conversation: Optional[text_utils.ConversationBuffer] = None,
+) -> Tuple[Optional[str], Optional[np.ndarray], Optional[int]]:
+    """Sentence-streaming version: returns (reply_text, tts_audio, tts_sr) without playing.
+    
+    Simplified brain path for sentence-by-sentence processing:
+    - No streaming modes (those don't fit sentence boundaries)
+    - Returns audio for caller to play interruptibly
+    """
+    route_mode = "LOCAL"
+    emotion_result: Optional[EmotionResult] = None
+
+    # Build context-enriched prompt for LLM
+    llm_prompt = text
+    if conversation is not None and len(conversation) > 0:
+        llm_prompt = conversation.format_prompt_with_context(text)
+
+    if FORCE_MODE in {"LOCAL", "CLOUD"}:
+        route_mode = FORCE_MODE
+        if ENABLE_EMOTION and emotion_classifier and emotion_classifier.available:
+            try:
+                emotion_result = emotion_classifier.predict(text)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Emotion] error: {exc}", file=sys.stderr)
+    else:
+        def _run_emotion() -> Optional[EmotionResult]:
+            if not (ENABLE_EMOTION and emotion_classifier and emotion_classifier.available):
+                return None
+            try:
+                return emotion_classifier.predict(text)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Emotion] error: {exc}", file=sys.stderr)
+                return None
+
+        def _run_intent() -> str:
+            if not ENABLE_INTENT_ROUTER:
+                return "LOCAL"
+            try:
+                rr = router_anchors_runtime.route_local_or_cloud(text)
+                print(
+                    f"[Route] mode={rr.mode} conf={rr.confidence:.2f} "
+                    f"(local={rr.best_local:.2f}, cloud={rr.best_cloud:.2f}, Δ={rr.delta:.2f}) | "
+                    f"anchor={rr.matched_anchor!r}",
+                    flush=True,
+                )
+                return rr.mode
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Route] error: {exc}", file=sys.stderr)
+                return "LOCAL"
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_emotion = pool.submit(_run_emotion)
+            fut_intent = pool.submit(_run_intent)
+            emotion_result = fut_emotion.result()
+            route_mode = fut_intent.result()
+
+    emotion_label = emotion_result.label if emotion_result else "neutral"
+
+    # ── CLOUD path ──────────────────────────────────────────────────────────
+    if route_mode == "CLOUD":
+        reply = cloud_llm.call_cloud_llm(
+            prompt=llm_prompt,
+            system=text_utils.CLOUD_DEFAULT_SYSTEM,
+            timeout=10.0,
+        )
+        tts_text = reply.strip() if reply and not reply.startswith("(Cloud LLM") else text
+        if reply:
+            print(f"[LLM-CLOUD] {reply}", flush=True)
+        
+        t2b = time.perf_counter()
+        print("Synthesizing (cloud)...", flush=True)
+        try:
+            tts_audio, tts_sr = _synthesize_tts(tts, voice, tts_text)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[error] TTS failed: {exc}", file=sys.stderr)
+            return tts_text, None, None
+        t3 = time.perf_counter()
+        print(f"[time] synthesize(cloud): {t3 - t2b:.2f}s", flush=True)
+        
+        if args.trim_start > 0.0:
+            tts_audio = audio_io.trim_start_seconds(tts_audio, tts_sr, args.trim_start)
+        
+        return tts_text, tts_audio, tts_sr
+
+    # ── LOCAL path ──────────────────────────────────────────────────────────
+    system = text_utils.build_local_system_prompt(emotion_label)
+
+    reply = ""
+    if args.ollama:
+        print("Ollama (LOCAL)...", flush=True)
+        t_ollama_start = time.perf_counter()
+        reply = llm_ollama.generate_ollama(
+            prompt=llm_prompt,
+            model=args.ollama_model,
+            system=system,
+            url=args.ollama_url,
+            num_predict=args.ollama_num_predict,
+            temperature=args.ollama_temperature,
+            stop=["\n"],
+            keep_alive=args.ollama_keep_alive,
+            num_thread=args.ollama_num_thread,
+            num_ctx=args.ollama_num_ctx,
+            num_batch=args.ollama_num_batch,
+            max_sentences=2,
+            max_words=36,
+            timeout=20,
+        )
+        t_ollama_end = time.perf_counter()
+        print(f"[time] ollama(local): {t_ollama_end - t_ollama_start:.2f}s", flush=True)
+
+    tts_text = reply.strip() if reply and not reply.startswith("(") else text
+    if reply:
+        print(f"[LLM-LOCAL] {reply}", flush=True)
+
+    t2b = time.perf_counter()
+    print("Synthesizing...", flush=True)
+    try:
+        tts_audio, tts_sr = _synthesize_tts(tts, voice, tts_text)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[error] TTS failed: {exc}", file=sys.stderr)
+        return tts_text, None, None
+    t3 = time.perf_counter()
+    print(f"[time] synthesize: {t3 - t2b:.2f}s", flush=True)
+    
+    if args.trim_start > 0.0:
+        tts_audio = audio_io.trim_start_seconds(tts_audio, tts_sr, args.trim_start)
+    
+    return tts_text, tts_audio, tts_sr
+
+
 # ── Warmup helpers ─────────────────────────────────────────────────────────
 
 def _warmup(args: Any, emotion_classifier: Optional[EmotionClassifierONNX]) -> None:
@@ -509,7 +646,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     voice = "sherpa_default"
 
     # ── Determine STT mode ──
-    if args.vad:
+    if args.sentence_streaming:
+        stt_mode = "sentence_streaming"
+    elif args.vad:
         stt_mode = "vad"
     elif args.streaming:
         stt_mode = "streaming"
@@ -517,6 +656,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         stt_mode = "fixed"
 
     stt_mode_label = {
+        "sentence_streaming": f"sentence-by-sentence streaming ({args.sentence_silence}s silence = sentence boundary)",
         "vad": "VAD always-listening + streaming OnlineRecognizer",
         "streaming": "streaming OnlineRecognizer with endpoint detection (Enter to start)",
         "fixed": f"fixed {args.record_seconds}s recording + chunked transcription",
@@ -556,13 +696,17 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     # Warm-up
     _warmup(args, emotion_classifier)
 
-    if stt_mode == "vad":
+    if stt_mode == "sentence_streaming":
+        print("Sentence-streaming mode: Press Enter to start session, speak naturally with pauses. Ctrl+C to quit.")
+    elif stt_mode == "vad":
         print("Always-listening mode (VAD). Say something — no Enter needed. Ctrl+C to quit.")
     else:
         print("Press Enter to record, or Ctrl+C to quit.")
 
     # ── Main loop ──────────────────────────────────────────────────────
-    if stt_mode == "vad":
+    if stt_mode == "sentence_streaming":
+        _main_loop_sentence_streaming(args, tts, voice, emotion_classifier, conversation)
+    elif stt_mode == "vad":
         _main_loop_vad(args, tts, voice, emotion_classifier, conversation)
     elif stt_mode == "streaming":
         _main_loop_streaming(args, tts, voice, emotion_classifier, conversation)
@@ -709,6 +853,83 @@ def _main_loop_fixed(
             conversation.add_turn(text, reply)
         print("Done. Press Enter to record again.", flush=True)
         gc.collect()
+
+
+def _main_loop_sentence_streaming(
+    args: Any,
+    tts: Any,
+    voice: str,
+    emotion_classifier: Optional[EmotionClassifierONNX],
+    conversation: Optional[text_utils.ConversationBuffer] = None,
+) -> None:
+    """Sentence-by-sentence streaming loop with interruptible TTS.
+    
+    User presses Enter once → continuous listening:
+    - Each sentence (0.8s silence) → brain → TTS (interruptible)
+    - New sentence stops previous TTS immediately
+    - Ctrl+C to exit
+    """
+    while True:
+        try:
+            input(">>> ")
+        except KeyboardInterrupt:
+            print("\nBye.")
+            break
+
+        current_player: Optional[audio_io.AudioPlayer] = None
+        sentence_count = 0
+        session_start = time.perf_counter()
+
+        print(f"[sentence-streaming] Session started (speak naturally, {args.sentence_silence:.1f}s pauses = sentence boundaries)", flush=True)
+
+        try:
+            for sentence_text, elapsed in stt_sherpa.stream_recognize_sentences(
+                input_device=args.input_device,
+                sentence_silence_threshold=args.sentence_silence,
+                max_total_seconds=args.max_listen_seconds,
+            ):
+                sentence_count += 1
+                print(f"[ASR-sentence-{sentence_count}] {sentence_text}", flush=True)
+
+                # Stop any active TTS from previous sentence
+                if current_player is not None and current_player.is_playing():
+                    print("[sentence-streaming] Interrupting previous TTS", flush=True)
+                    current_player.stop()
+                    current_player = None
+
+                # Process this sentence through brain (non-blocking TTS synthesis)
+                t0 = time.perf_counter()
+                reply_text, tts_audio, tts_sr = _run_turn_brain_sentence(
+                    t0, args, sentence_text, tts, voice, emotion_classifier, conversation
+                )
+
+                # Add to conversation context
+                if conversation is not None and reply_text:
+                    conversation.add_turn(sentence_text, reply_text)
+
+                # Start interruptible TTS playback
+                if tts_audio is not None and tts_sr is not None:
+                    print("Playing (interruptible)...", flush=True)
+                    try:
+                        current_player = audio_io.play_audio_interruptible(
+                            tts_audio, tts_sr, args.output_device, volume=args.volume
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[error] playback failed: {exc}", file=sys.stderr)
+                        current_player = None
+
+                t_total = time.perf_counter() - t0
+                print(f"[time] sentence-{sentence_count} total: {t_total:.2f}s", flush=True)
+                gc.collect()
+
+        except KeyboardInterrupt:
+            print("\n[sentence-streaming] Session interrupted", flush=True)
+            if current_player is not None:
+                current_player.stop()
+
+        session_elapsed = time.perf_counter() - session_start
+        print(f"[sentence-streaming] Session ended. Processed {sentence_count} sentence(s) in {session_elapsed:.1f}s", flush=True)
+        print("Press Enter to start new session.", flush=True)
 
 
 if __name__ == "__main__":

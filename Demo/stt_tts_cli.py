@@ -39,6 +39,14 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         "--max-turns", type=int, default=5,
         help="Number of conversation turns to remember for multi-turn context (default 5, 0 to disable).",
     )
+    parser.add_argument(
+        "--sentence-streaming", action="store_true", default=False,
+        help="Sentence-by-sentence streaming mode: each sentence (0.8s silence) triggers immediate processing.",
+    )
+    parser.add_argument(
+        "--sentence-silence", type=float, default=0.8,
+        help="Silence duration (seconds) to detect sentence boundaries in sentence-streaming mode (default 0.8).",
+    )
 
     # --- Ollama (LOCAL LLM) ---
     parser.add_argument("--ollama", action="store_true", help="Send STT text to Ollama and TTS the reply (voice chatbot).")
@@ -81,6 +89,8 @@ def print_config(args: argparse.Namespace, voice: str) -> None:
         "vad",
         "max_listen_seconds",
         "max_turns",
+        "sentence_streaming",
+        "sentence_silence",
         "input_device",
         "output_device",
         "volume",

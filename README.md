@@ -6,7 +6,8 @@ rpi-voice-demo
 Voice demo for Raspberry Pi — sherpa-onnx based STT/TTS with emotion-aware
 intent routing and natural conversation flow:
 
-- **STT**: sherpa-onnx streaming Zipformer (OnlineRecognizer, 3 modes)
+- **STT**: sherpa-onnx streaming Zipformer (OnlineRecognizer, 4 modes)
+  - `--sentence-streaming`: sentence-by-sentence mode — each 0.8s pause triggers processing
   - `--streaming` (default): Enter → mic stream → endpoint auto-detection → text
   - `--no-streaming`: Enter → fixed N-second recording → chunked transcription
   - `--vad`: always-listening — silero-vad detects speech automatically, no Enter needed
@@ -37,13 +38,16 @@ python -m Demo
 ollama serve &
 python -m Demo --ollama --ollama-model smollm2:360m
 
-# 5. Streaming mode (default — press Enter, speak, endpoint auto-detects end)
+# 5. Sentence-streaming mode (most natural — speak multiple sentences with pauses)
+python -m Demo --sentence-streaming
+
+# 6. Streaming mode (default — press Enter, speak, endpoint auto-detects end)
 python -m Demo --streaming
 
-# 6. VAD always-listening mode (no Enter needed, just speak)
+# 7. VAD always-listening mode (no Enter needed, just speak)
 python -m Demo --vad
 
-# 7. Fixed-duration fallback (3 seconds)
+# 8. Fixed-duration fallback (3 seconds)
 python -m Demo --no-streaming --record-seconds 3
 ```
 
@@ -51,11 +55,13 @@ python -m Demo --no-streaming --record-seconds 3
 
 | Flag | Trigger | Description |
 |------|---------|-------------|
+| `--sentence-streaming` | Enter key | Continuous listening: each sentence (0.8s silence) triggers immediate processing. Most natural for multi-sentence conversations. |
 | `--streaming` (default) | Enter key | Opens mic, streams to OnlineRecognizer, endpoint detection auto-stops |
 | `--no-streaming` | Enter key | Records for `--record-seconds`, then feeds entire buffer in chunks |
 | `--vad` | Automatic | Always-listening: silero-vad detects speech start/end, no Enter needed |
 
 Common options:
+- `--sentence-silence 0.8` — silence duration (seconds) for sentence boundaries in `--sentence-streaming` mode (default 0.8s)
 - `--max-listen-seconds 15` — timeout for streaming/VAD modes (default 15s)
 - `--record-seconds 3` — duration for `--no-streaming` mode (default 3s)
 

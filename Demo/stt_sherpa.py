@@ -5,17 +5,18 @@ Mirrors the official sherpa-onnx microphone example:
   - Audio fed in small chunks with decode_stream per chunk
   - Endpoint detection for automatic turn boundary
 
-Provides three recognition modes:
+Provides four recognition modes:
   1. transcribe_sherpa(audio, sr)             – feed a pre-recorded buffer in chunks
   2. stream_recognize_until_endpoint(...)      – live mic with auto endpoint (Phase 2)
   3. vad_stream_recognize_one(...)             – VAD + streaming for one utterance (Phase 3)
+  4. stream_recognize_sentences(...)           – sentence-by-sentence streaming with 0.8s silence
 """
 from __future__ import annotations
 
 import os
 import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Generator, Optional, Tuple
 
 import numpy as np
 
@@ -403,3 +404,98 @@ def vad_stream_recognize_one(
     elapsed = time.perf_counter() - t0
     print(f"[sherpa-vad] final text: {repr(text)} ({elapsed:.2f}s)", flush=True)
     return text, elapsed
+
+
+# ---------------------------------------------------------------------------
+# Mode 4: sentence-by-sentence streaming (Phase 4)
+# ---------------------------------------------------------------------------
+
+
+def stream_recognize_sentences(
+    input_device: Optional[int] = None,
+    sentence_silence_threshold: float = 0.8,
+    max_total_seconds: float = 120.0,
+) -> Generator[Tuple[str, float], None, None]:
+    """Stream mic continuously, yield each sentence when 0.8s silence detected.
+
+    This enables natural multi-sentence conversations:
+    - User speaks sentence 1 → pause 0.8s → yield sentence 1
+    - User continues with sentence 2 → pause 0.8s → yield sentence 2
+    - Continues until max_total_seconds or external stop
+
+    Yields (sentence_text, elapsed_since_start) tuples.
+    """
+    import sounddevice as sd
+
+    recognizer = _init_recognizer()
+    if recognizer is None:
+        print("[sherpa] Recognizer not available for sentence streaming.", flush=True)
+        return
+
+    chunk_samples = int(CHUNK_SECONDS * SAMPLE_RATE)
+    stream = recognizer.create_stream()
+    
+    t_session_start = time.perf_counter()
+    t_last_text_change = t_session_start
+    last_text = ""
+    
+    print(f"[sherpa-sentence] Listening... (sentence boundary: {sentence_silence_threshold}s silence)", flush=True)
+
+    try:
+        with sd.InputStream(
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype="float32",
+            device=input_device,
+        ) as mic:
+            while True:
+                elapsed_total = time.perf_counter() - t_session_start
+                if elapsed_total >= max_total_seconds:
+                    print(f"[sherpa-sentence] session timeout ({max_total_seconds}s)", flush=True)
+                    break
+
+                # Read and feed audio chunk
+                samples, _ = mic.read(chunk_samples)
+                samples = samples.reshape(-1)
+                stream.accept_waveform(SAMPLE_RATE, samples)
+
+                while recognizer.is_ready(stream):
+                    recognizer.decode_stream(stream)
+
+                result = recognizer.get_result(stream)
+                current_text = str(result).strip()
+
+                # Check if text changed (new words detected)
+                if current_text != last_text:
+                    if current_text and not last_text:
+                        # Speech started
+                        print(f"[sherpa-sentence] speech started", flush=True)
+                    elif current_text:
+                        # Text updated
+                        print(f"[sherpa-sentence] partial: {repr(current_text)}", flush=True)
+                    
+                    last_text = current_text
+                    t_last_text_change = time.perf_counter()
+                    continue
+
+                # Text hasn't changed — check silence duration
+                silence_duration = time.perf_counter() - t_last_text_change
+                
+                if silence_duration >= sentence_silence_threshold and current_text:
+                    # Sentence boundary detected!
+                    sentence = current_text
+                    elapsed = time.perf_counter() - t_session_start
+                    print(f"[sherpa-sentence] sentence confirmed ({silence_duration:.2f}s silence): {repr(sentence)}", flush=True)
+                    
+                    # Yield this sentence
+                    yield sentence, elapsed
+                    
+                    # Reset stream for next sentence
+                    recognizer.reset(stream)
+                    last_text = ""
+                    t_last_text_change = time.perf_counter()
+
+    except GeneratorExit:
+        print("[sherpa-sentence] generator stopped by caller", flush=True)
+    except Exception as exc:  # pragma: no cover
+        print(f"[sherpa-sentence] error: {exc}", flush=True)
