@@ -314,9 +314,15 @@ def _generate_filler_ollama(
     """
     # Check if filler is enabled (CLI flag or env var)
     filler_enabled = getattr(args, 'cloud_filler', ENABLE_CLOUD_FILLER)
-    if not filler_enabled or not args.ollama:
+    if not filler_enabled:
+        print("[Filler] Skipped (disabled by --no-cloud-filler)", flush=True)
         return ""
     
+    if not args.ollama:
+        print("[Filler] Skipped (Ollama not enabled; use --ollama flag)", flush=True)
+        return ""
+    
+    print("[Filler] Generating Ollama filler...", flush=True)
     system = text_utils.build_cloud_filler_system_prompt(emotion_label)
     try:
         filler = llm_ollama.generate_ollama(
@@ -335,9 +341,12 @@ def _generate_filler_ollama(
             max_words=10,
             timeout=timeout,
         )
-        return filler.strip() if filler and not filler.startswith("(") else ""
+        result = filler.strip() if filler and not filler.startswith("(") else ""
+        if not result:
+            print(f"[Filler] Generation returned empty/error: {filler[:100] if filler else 'empty'}", flush=True)
+        return result
     except Exception as exc:  # noqa: BLE001
-        print(f"[Filler] generation failed: {exc}", flush=True, file=sys.stderr)
+        print(f"[Filler] Generation failed: {exc}", flush=True, file=sys.stderr)
         return ""
 
 
