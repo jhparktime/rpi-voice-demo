@@ -796,12 +796,9 @@ def _run_turn_brain_sentence(
         print(f"\n[LATENCY] Total TTS+Play: {t_tts_end - t_tts_start:.2f}s")
         print("="*60 + "\n", flush=True)
 
-        # Combine all chunks into single audio array for return
-        if combined_audio_chunks and sample_rate:
-            combined_audio = np.concatenate(combined_audio_chunks)
-            return cloud_text, combined_audio, sample_rate
-        else:
-            return cloud_text, None, None
+        # Audio has already been played via _play_chunks_pipelined for CLOUD path.
+        # We return no audio here so that the caller does NOT play it a second time.
+        return cloud_text, None, None
 
     # ── LOCAL path ──────────────────────────────────────────────────────────
     system = text_utils.build_local_system_prompt(emotion_label)
