@@ -326,7 +326,7 @@ def _generate_filler_ollama(
     system = text_utils.build_cloud_filler_system_prompt(emotion_label)
     try:
         filler = llm_ollama.generate_ollama(
-            prompt="",  # Filler doesn't need user prompt
+            prompt="Generate a short bridge phrase.",  # Explicit prompt for filler
             model=args.ollama_model,
             system=system,
             url=args.ollama_url,
