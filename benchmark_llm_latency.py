@@ -140,6 +140,24 @@ def main():
     parser.add_argument("--gemini-only", action="store_true", help="Test Gemini only")
     parser.add_argument("--ollama-url", default="http://localhost:11434/api/generate")
     parser.add_argument("--ollama-model", default="smollm2:360m")
+    parser.add_argument(
+        "--gemini-min-interval",
+        type=float,
+        default=6.0,
+        help="Minimum seconds between Gemini request starts (default: 6.0)",
+    )
+    parser.add_argument(
+        "--gemini-retries",
+        type=int,
+        default=3,
+        help="How many times to retry on Gemini HTTP 429 (default: 3)",
+    )
+    parser.add_argument(
+        "--gemini-backoff",
+        type=float,
+        default=10.0,
+        help="Base backoff seconds after Gemini HTTP 429; multiplied by attempt index (default: 10.0)",
+    )
     args = parser.parse_args()
     
     # Check environment
@@ -162,7 +180,12 @@ def main():
         if has_gemini:
             print("[Gemini] API key found")
             print("[Gemini] Free tier limits: 15 RPM, 1M TPM, 1500 RPD")
-            print("[Gemini] Strategy: Interleave with Ollama + enforce 4s minimum interval")
+            print(
+                "[Gemini] Strategy: Interleave with Ollama + enforce min interval + retry with backoff on 429"
+            )
+            print(
+                f"[Gemini] min-interval={args.gemini_min_interval:.1f}s, retries={args.gemini_retries}, backoff={args.gemini_backoff:.1f}s"
+            )
         elif has_openai:
             print("[OpenAI] API key found")
         elif has_cloud:
@@ -197,9 +220,12 @@ def main():
         "gemini": {},
     }
     
-    # Rate limit management for Gemini (15 RPM = 4 seconds per request)
-    GEMINI_MIN_INTERVAL = 4.0  # seconds
-    last_gemini_call_time: Optional[float] = None
+    # Rate limit management for Gemini
+    # Note: Even if the nominal limit is 15 RPM (4s), real-world behavior can require longer waits,
+    # especially if the key has been used recently. We'll enforce a minimum interval and also
+    # backoff+retry when 429 happens.
+    GEMINI_MIN_INTERVAL = max(0.0, float(args.gemini_min_interval))
+    last_gemini_request_start_time: Optional[float] = None
     
     # Run benchmarks
     for query in TEST_QUERIES:
@@ -234,17 +260,32 @@ def main():
             
             # Gemini (interleaved after Ollama to avoid rate limits)
             if not args.ollama_only and (has_gemini or has_openai or has_cloud):
-                # Rate limit management: ensure at least 4 seconds between Gemini calls
-                if last_gemini_call_time is not None:
-                    time_since_last = time.perf_counter() - last_gemini_call_time
+                # Enforce minimum interval between request START times
+                if last_gemini_request_start_time is not None and GEMINI_MIN_INTERVAL > 0:
+                    time_since_last = time.perf_counter() - last_gemini_request_start_time
                     if time_since_last < GEMINI_MIN_INTERVAL:
                         wait_time = GEMINI_MIN_INTERVAL - time_since_last
                         print(f"  [Rate limit] Waiting {wait_time:.1f}s before next Gemini call...")
                         time.sleep(wait_time)
-                
-                call_start = time.perf_counter()
-                latency, response = benchmark_gemini(query["prompt"])
-                last_gemini_call_time = time.perf_counter()
+
+                # Retry with backoff on HTTP 429
+                latency = -1.0
+                response = ""
+                for attempt in range(max(0, int(args.gemini_retries)) + 1):
+                    last_gemini_request_start_time = time.perf_counter()
+                    latency, response = benchmark_gemini(query["prompt"])
+
+                    is_rate_limited = ("429" in response) or ("rate limit" in response.lower())
+                    if not is_rate_limited:
+                        break
+
+                    if attempt < int(args.gemini_retries):
+                        backoff = float(args.gemini_backoff) * float(attempt + 1)
+                        backoff = max(backoff, GEMINI_MIN_INTERVAL)
+                        print(
+                            f"  [Rate limit] Gemini 429 detected. Backing off {backoff:.1f}s then retrying ({attempt+1}/{args.gemini_retries})..."
+                        )
+                        time.sleep(backoff)
                 
                 gemini_latencies.append(latency)
                 gemini_responses.append(response)
