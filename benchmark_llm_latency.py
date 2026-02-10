@@ -105,7 +105,7 @@ def benchmark_gemini(prompt: str) -> Tuple[float, str]:
     return latency, response
 
 
-def print_statistics(name: str, latencies: List[float]) -> None:
+def print_statistics(name: str, latencies: List[float], responses: List[str] = None) -> None:
     """Print statistical summary of latencies."""
     if not latencies or all(l < 0 for l in latencies):
         print(f"  {name}: ALL FAILED")
@@ -116,6 +116,11 @@ def print_statistics(name: str, latencies: List[float]) -> None:
         print(f"  {name}: NO VALID DATA")
         return
     
+    # Check for rate limit errors
+    rate_limited = 0
+    if responses:
+        rate_limited = sum(1 for r in responses if "429" in r or "rate limit" in r.lower())
+    
     print(f"  {name}:")
     print(f"    Min:    {min(valid):.3f}s")
     print(f"    Max:    {max(valid):.3f}s")
@@ -124,6 +129,8 @@ def print_statistics(name: str, latencies: List[float]) -> None:
     if len(valid) > 1:
         print(f"    StdDev: {stdev(valid):.3f}s")
     print(f"    Successes: {len(valid)}/{len(latencies)}")
+    if rate_limited > 0:
+        print(f"    ⚠️ Rate limited: {rate_limited}/{len(latencies)} requests")
 
 
 def main():
@@ -154,6 +161,8 @@ def main():
     if not args.ollama_only:
         if has_gemini:
             print("[Gemini] API key found")
+            print("[Gemini] Free tier limits: 15 RPM, 1M TPM, 1500 RPD")
+            print("[Gemini] Strategy: Interleave with Ollama calls to avoid rate limits")
         elif has_openai:
             print("[OpenAI] API key found")
         elif has_cloud:
@@ -162,10 +171,28 @@ def main():
             print("[WARNING] No Cloud LLM configured (set GEMINI_API_KEY or OPENAI_API_KEY)")
     
     print("="*70)
+    
+    # Ollama warm-up (if testing Ollama)
+    if not args.gemini_only:
+        print("\n[Ollama] Warming up model (first call loads model into memory)...")
+        warmup_start = time.perf_counter()
+        _, warmup_response = benchmark_ollama(
+            "Hello",
+            model=args.ollama_model,
+            url=args.ollama_url,
+        )
+        warmup_end = time.perf_counter()
+        print(f"[Ollama] Warm-up completed in {warmup_end - warmup_start:.2f}s")
+        print(f"[Ollama] Response: {warmup_response[:50]}...")
+    
     print()
     
     # Results storage
     results: Dict[str, Dict[str, List[float]]] = {
+        "ollama": {},
+        "gemini": {},
+    }
+    results_responses: Dict[str, Dict[str, List[str]]] = {
         "ollama": {},
         "gemini": {},
     }
@@ -179,36 +206,48 @@ def main():
         
         ollama_latencies: List[float] = []
         gemini_latencies: List[float] = []
+        ollama_responses: List[str] = []
+        gemini_responses: List[str] = []
         
-        # Ollama benchmark
-        if not args.gemini_only:
-            print(f"\n[Ollama] Running {args.iterations} iteration(s)...")
-            for i in range(args.iterations):
+        # Interleaved benchmark: Ollama, Gemini, Ollama, Gemini, ...
+        # This naturally spaces out Gemini calls to avoid rate limits
+        print(f"\n[Interleaved] Running {args.iterations} iteration(s) (Ollama → Gemini → Ollama → ...)...")
+        
+        for i in range(args.iterations):
+            # Ollama
+            if not args.gemini_only:
                 latency, response = benchmark_ollama(
                     query["prompt"],
                     model=args.ollama_model,
                     url=args.ollama_url,
                 )
                 ollama_latencies.append(latency)
+                ollama_responses.append(response)
                 
                 status = f"{latency:.3f}s" if latency >= 0 else "FAILED"
                 response_preview = response[:60] + "..." if len(response) > 60 else response
-                print(f"  [{i+1}/{args.iterations}] {status} | {response_preview}")
-        
-        # Gemini benchmark
-        if not args.ollama_only and (has_gemini or has_openai or has_cloud):
-            print(f"\n[Gemini/Cloud] Running {args.iterations} iteration(s)...")
-            for i in range(args.iterations):
+                print(f"  [Ollama {i+1}/{args.iterations}] {status} | {response_preview}")
+            
+            # Gemini (interleaved after Ollama to avoid rate limits)
+            if not args.ollama_only and (has_gemini or has_openai or has_cloud):
                 latency, response = benchmark_gemini(query["prompt"])
                 gemini_latencies.append(latency)
+                gemini_responses.append(response)
                 
                 status = f"{latency:.3f}s" if latency >= 0 else "FAILED"
                 response_preview = response[:60] + "..." if len(response) > 60 else response
-                print(f"  [{i+1}/{args.iterations}] {status} | {response_preview}")
+                
+                # Check for rate limit error
+                if "429" in response or "rate limit" in response.lower():
+                    print(f"  [Gemini {i+1}/{args.iterations}] {status} | {response_preview} ⚠️ RATE LIMITED")
+                else:
+                    print(f"  [Gemini {i+1}/{args.iterations}] {status} | {response_preview}")
         
         # Store results
         results["ollama"][query["name"]] = ollama_latencies
         results["gemini"][query["name"]] = gemini_latencies
+        results_responses["ollama"][query["name"]] = ollama_responses
+        results_responses["gemini"][query["name"]] = gemini_responses
     
     # Final summary
     print(f"\n\n{'='*70}")
@@ -219,10 +258,10 @@ def main():
         print(f"{query['name']} ({query['type']}):")
         
         if not args.gemini_only and results["ollama"][query["name"]]:
-            print_statistics("Ollama", results["ollama"][query["name"]])
+            print_statistics("Ollama", results["ollama"][query["name"]], results_responses["ollama"][query["name"]])
         
         if not args.ollama_only and results["gemini"][query["name"]]:
-            print_statistics("Gemini/Cloud", results["gemini"][query["name"]])
+            print_statistics("Gemini/Cloud", results["gemini"][query["name"]], results_responses["gemini"][query["name"]])
         
         # Comparison
         ollama_valid = [l for l in results["ollama"].get(query["name"], []) if l >= 0]
