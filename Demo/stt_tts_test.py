@@ -75,13 +75,15 @@ def _play_chunks_pipelined(
     """
     if not chunks:
         return [], None
-    
+
+    t0 = time.perf_counter()
     tts_queue: Queue = Queue(maxsize=2)  # Buffer up to 2 chunks ahead
     audio_chunks = []
     sample_rate = None
     
     def _tts_producer():
         """Background thread: TTS all chunks and push to queue."""
+        first_done_logged = False
         for i, chunk in enumerate(chunks):
             chunk = chunk.strip()
             if not chunk:
@@ -91,6 +93,12 @@ def _play_chunks_pipelined(
                 chunk_audio, chunk_sr = _synthesize_tts(tts, voice, chunk)
                 t_end = time.perf_counter()
                 print(f"  [LATENCY] Chunk-{i+1} TTS: {t_end - t_start:.2f}s", flush=True)
+                if i == 0 and not first_done_logged:
+                    print(
+                        f"  [LATENCY] First cloud chunk TTS done at: {t_end - t0:.2f}s",
+                        flush=True,
+                    )
+                    first_done_logged = True
                 tts_queue.put((i, chunk_audio, chunk_sr))
             except Exception as exc:  # noqa: BLE001
                 print(f"[error] TTS chunk {i+1} failed: {exc}", file=sys.stderr)
@@ -124,6 +132,11 @@ def _play_chunks_pipelined(
             chunk_audio = audio_io.trim_start_seconds(chunk_audio, chunk_sr, args.trim_start)
         
         # Play this chunk (blocking)
+        if chunk_idx == 0:
+            print(
+                f"  [LATENCY] First cloud chunk play start: {time.perf_counter() - t0:.2f}s",
+                flush=True,
+            )
         print(f"  Playing chunk {chunk_idx+1}/{len(chunks)}...", flush=True)
         t_play_start = time.perf_counter()
         try:
@@ -306,6 +319,7 @@ def _run_turn_ollama_or_direct(t0: float, args: Any, text: str, tts: Any, voice:
 def _generate_filler_ollama(
     args: Any,
     emotion_label: Optional[str],
+    user_text: str,
     timeout: float = 3.0,
 ) -> str:
     """Generate short Ollama filler phrase for Cloud waiting period.
@@ -325,8 +339,14 @@ def _generate_filler_ollama(
     print("[Filler] Generating Ollama filler...", flush=True)
     system = text_utils.build_cloud_filler_system_prompt(emotion_label)
     try:
+        filler_prompt = (
+            "User just said: "
+            f"{user_text!r}\n"
+            "Generate ONE very short spoken bridge phrase (3-8 words) that briefly acknowledges this topic "
+            "while you think. Do NOT answer the question or give details."
+        )
         filler = llm_ollama.generate_ollama(
-            prompt="Generate a short bridge phrase.",  # Explicit prompt for filler
+            prompt=filler_prompt,
             model=args.ollama_model,
             system=system,
             url=args.ollama_url,
@@ -434,7 +454,7 @@ def _run_turn_brain(
 
         # Parallel: Ollama filler + Cloud LLM
         def _call_filler():
-            return _generate_filler_ollama(args, emotion_label, timeout=3.0)
+            return _generate_filler_ollama(args, emotion_label, text, timeout=3.0)
 
         def _call_cloud():
             return cloud_llm.call_cloud_llm(
@@ -507,14 +527,25 @@ def _run_turn_brain(
 
         print(f"[LATENCY] Cloud LLM call: {t_cloud_ready - t_parallel_start:.2f}s")
 
-        cloud_text = cloud_reply.strip() if cloud_reply and not cloud_reply.startswith("(") else text
+        # Postprocess Cloud reply length (sentences/words) for RPi-friendly TTS
+        if cloud_reply and not cloud_reply.startswith("("):
+            max_sents = getattr(args, "cloud_max_sentences", 2)
+            max_words = getattr(args, "cloud_max_words", 60)
+            cloud_text = text_utils.postprocess_output(
+                cloud_reply,
+                max_sentences=max_sents,
+                max_words=max_words,
+            )
+        else:
+            cloud_text = text
         assistant_reply = cloud_text
 
         if cloud_reply:
             print(f"[LLM-CLOUD] {cloud_reply}\n", flush=True)
 
         # Split and play with pipelined TTS
-        chunks = text_utils.split_into_chunks(cloud_text)
+        max_words_per_chunk = getattr(args, "cloud_tts_max_words_per_chunk", 20)
+        chunks = text_utils.split_into_chunks(cloud_text, max_words_per_chunk=max_words_per_chunk)
         if not chunks:
             chunks = [cloud_text]
 
@@ -662,7 +693,7 @@ def _run_turn_brain_sentence(
 
         # Parallel: Ollama filler + Cloud LLM
         def _call_filler():
-            return _generate_filler_ollama(args, emotion_label, timeout=3.0)
+            return _generate_filler_ollama(args, emotion_label, text, timeout=3.0)
 
         def _call_cloud():
             return cloud_llm.call_cloud_llm(
@@ -735,13 +766,24 @@ def _run_turn_brain_sentence(
 
         print(f"[LATENCY] Cloud LLM call: {t_cloud_ready - t_parallel_start:.2f}s")
 
-        cloud_text = cloud_reply.strip() if cloud_reply and not cloud_reply.startswith("(") else text
+        # Postprocess Cloud reply length (sentences/words) for RPi-friendly TTS
+        if cloud_reply and not cloud_reply.startswith("("):
+            max_sents = getattr(args, "cloud_max_sentences", 2)
+            max_words = getattr(args, "cloud_max_words", 60)
+            cloud_text = text_utils.postprocess_output(
+                cloud_reply,
+                max_sentences=max_sents,
+                max_words=max_words,
+            )
+        else:
+            cloud_text = text
 
         if cloud_reply:
             print(f"[LLM-CLOUD] {cloud_reply}\n", flush=True)
 
         # Split and play with pipelined TTS
-        chunks = text_utils.split_into_chunks(cloud_text)
+        max_words_per_chunk = getattr(args, "cloud_tts_max_words_per_chunk", 20)
+        chunks = text_utils.split_into_chunks(cloud_text, max_words_per_chunk=max_words_per_chunk)
         if not chunks:
             chunks = [cloud_text]
 

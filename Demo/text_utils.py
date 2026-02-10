@@ -45,44 +45,66 @@ def postprocess_output(text: str, max_sentences: int, max_words: int) -> str:
     return s.strip()
 
 
-def split_into_chunks(text: str) -> List[str]:
-    """Split text into sentence chunks for streaming TTS.
-    
-    Uses regex to split on sentence boundaries (. ! ?) while preserving punctuation.
-    Handles common abbreviations like "Dr.", "Mr.", "Mrs." to avoid false splits.
-    
+def split_into_chunks(text: str, max_words_per_chunk: int | None = None) -> List[str]:
+    """Split text into sentence/word chunks for streaming TTS.
+
+    1) First split on sentence boundaries (. ! ?) while preserving punctuation.
+    2) Optionally re-split long sentences into smaller chunks by word count
+       (max_words_per_chunk), so that each chunk is TTS-friendly on low-power
+       devices (e.g., Raspberry Pi).
+
     Returns:
         List of sentence strings (each including its punctuation).
         Empty strings are filtered out.
     """
     if not text or not text.strip():
         return []
-    
+
     # Normalize whitespace
     text = re.sub(r'\s+', ' ', text.strip())
-    
+
     # Split on sentence boundaries while capturing the punctuation
     # Use lookahead to avoid splitting on common abbreviations
     # Pattern: split after .!? followed by space (or end), but not after common abbreviations
     parts = re.split(r'(?<!\bDr)(?<!\bMr)(?<!\bMrs)(?<!\bMs)(?<!\bProf)([.!?]+)\s+', text)
-    
+
     # Combine text with its punctuation
-    chunks = []
+    sentence_chunks: List[str] = []
     i = 0
     while i < len(parts):
         if i + 1 < len(parts) and parts[i+1] in ['.', '!', '?', '..', '...', '!?', '?!']:
             # Combine text with punctuation
             chunk = parts[i] + parts[i+1]
-            chunks.append(chunk.strip())
+            sentence_chunks.append(chunk.strip())
             i += 2
         else:
             # Text without captured punctuation (last chunk or already has punctuation)
             if parts[i].strip():
-                chunks.append(parts[i].strip())
+                sentence_chunks.append(parts[i].strip())
             i += 1
-    
-    # Filter empty chunks and return
-    return [c for c in chunks if c]
+
+    # If no word limit requested, return sentence chunks as-is
+    if not max_words_per_chunk or max_words_per_chunk <= 0:
+        return [c for c in sentence_chunks if c]
+
+    # Re-split each sentence chunk by word count
+    final_chunks: List[str] = []
+    for sent in sentence_chunks:
+        words = sent.split()
+        if len(words) <= max_words_per_chunk:
+            final_chunks.append(sent.strip())
+            continue
+
+        current: List[str] = []
+        for w in words:
+            current.append(w)
+            if len(current) >= max_words_per_chunk:
+                final_chunks.append(" ".join(current).strip())
+                current = []
+        if current:
+            final_chunks.append(" ".join(current).strip())
+
+    return [c for c in final_chunks if c]
 
 
 OLLAMA_DEFAULT_SYSTEM = (
@@ -123,7 +145,8 @@ def build_cloud_system_prompt(emotion_label: str | None) -> str:
     emo_hint = f"\nEmotionHint: {emotion_label}" if emotion_label else ""
     return (
         "You are a knowledgeable assistant providing accurate, detailed information.\n"
-        "Reply in English in 3-5 sentences with specific, concrete details.\n"
+        "Reply in English in at most 2 sentences, focusing on the single most important idea for the user.\n"
+        "Keep it concise but concrete (roughly 35–50 words total).\n"
         "Sound professional yet conversational—like an expert sharing knowledge clearly.\n"
         "\n"
         "Guidelines:\n"
@@ -149,25 +172,22 @@ def build_cloud_filler_system_prompt(emotion_label: str | None) -> str:
     """CLOUD filler prompt for LOCAL sLLM: brief spoken bridge, no answering."""
     emo_hint = f"\nEmotionHint: {emotion_label}" if emotion_label else ""
     return (
-        "Generate a SHORT bridge phrase (under 10 words) while I process your request.\n"
+        "You are generating a SHORT spoken bridge phrase while a heavier Cloud model is thinking.\n"
+        "You may briefly acknowledge the TOPIC of the user's question, but you must NOT answer it.\n"
+        "Keep the phrase neutral and supportive.\n"
+        "\n"
+        "Generate a SHORT bridge phrase (ideally 3-8 words) while I process the request.\n"
         "Examples (feel free to vary naturally):\n"
-        "- 'Let me check that for you.'\n"
-        "- 'Give me a second, I'll look that up.'\n"
-        "- 'Let me find that out.'\n"
-        "- 'One moment, let me check.'\n"
-        "- 'Hmm, let me see...'\n"
-        "- 'Looking that up now.'\n"
-        "- 'Just a sec, checking...'\n"
-        "- 'Alright, let me pull that info.'\n"
-        "- 'Hang on, searching for that.'\n"
-        "- 'Give me a moment here.'\n"
-        "- 'Let me grab that for you.'\n"
-        "- 'One sec, finding that.'\n"
+        "- 'Let me think about that AI question with you.'\n"
+        "- 'Give me a second to organize that CPU idea.'\n"
+        "- 'One moment, I am lining up the key points.'\n"
+        "- 'Let me gather the most important details for you.'\n"
         "\n"
         "CRITICAL RULES:\n"
         "- Keep it under 10 words\n"
-        "- DO NOT answer the question\n"
+        "- You may mention the topic, but DO NOT answer the question\n"
         "- DO NOT apologize or explain limitations\n"
+        "- DO NOT use random poetic imagery (flowers, wind, weather, etc.) unrelated to the topic\n"
         "- Just a quick bridge phrase, not an answer\n"
         "- Sound natural and conversational"
         f"{emo_hint}"
