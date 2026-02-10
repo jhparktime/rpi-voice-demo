@@ -102,29 +102,31 @@ source venv/bin/activate
 python -m Demo --ollama --ollama-model smollm2:360m
 ```
 
-## CLOUD LLM (Gemini or custom HTTP)
+## CLOUD LLM (OpenAI, Gemini, or custom HTTP)
 
-### Option A: Google Gemini (free tier, e.g. Gemini 2.5 Flash)
+**Priority:** `OPENAI_API_KEY` → `GEMINI_API_KEY` → `CLOUD_LLM_URL`. Set only one (or the first wins).
+
+**sLLM filler:** When the route is CLOUD, the local sLLM (Ollama) can say a short bridge first (e.g. "Let me check that for you.") before the Cloud LLM answers. To enable this, run with **`--ollama`** (and have Ollama running). Without `--ollama`, only the Cloud LLM reply is used.
+
+### Option A: OpenAI (GPT)
+
+1. Get an API key: [OpenAI API keys](https://platform.openai.com/api-keys).
+2. Set via environment (do not commit):
+   ```bash
+   export OPENAI_API_KEY="sk-..."
+   ```
+3. Optional: `OPENAI_MODEL` (default: `gpt-4o-mini`). Other options: `gpt-4o`, `gpt-4-turbo`, etc.
+
+### Option B: Google Gemini (free tier, e.g. Gemini 2.5 Flash)
 
 1. Get an API key: [Google AI Studio](https://aistudio.google.com/apikey) → Create API key.
-2. Set the key via **environment variable only** (do not commit it):
-
-   **Shell (current session):**
+2. Set via environment (do not commit):
    ```bash
    export GEMINI_API_KEY="your-api-key-here"
-   python -m Demo --sentence-streaming
    ```
-
-   **Or use a `.env` file (recommended, not committed):**
-   ```bash
-   # In project root, create .env (already in .gitignore)
-   echo 'GEMINI_API_KEY=your-api-key-here' > .env
-   ```
-   Then load it before running (e.g. `set -a && source .env && set +a` or use `python-dotenv` in your script).
-
 3. Optional: `CLOUD_LLM_MODEL` (default: `gemini-2.5-flash`).
 
-### Option B: Custom HTTP endpoint
+### Option C: Custom HTTP endpoint
 
 - `CLOUD_LLM_URL` (required) — Base URL for your HTTP LLM endpoint.
   POSTs JSON: `{ "prompt": "<user text>", "system": "<system prompt>" }`
