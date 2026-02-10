@@ -426,7 +426,10 @@ def _run_turn_brain(
         def _generate_cloud_main() -> str:
             """Thread 2: Call Cloud LLM (text only, TTS done in main thread)."""
             system = text_utils.build_cloud_system_prompt(emotion_label)
+            t_cloud_start = time.perf_counter()
             reply = cloud_llm.call_cloud_llm(prompt=llm_prompt, system=system, timeout=20.0)
+            t_cloud_end = time.perf_counter()
+            print(f"[time] cloud-llm-call: {t_cloud_end - t_cloud_start:.2f}s", flush=True)
             tts_text = reply.strip() if reply and not reply.startswith("(Cloud LLM") else text
             if reply:
                 print(f"[LLM-CLOUD] {reply}", flush=True)
@@ -636,11 +639,14 @@ def _run_turn_brain_sentence(
         def _generate_cloud() -> str:
             """Thread 2: Call Cloud LLM (text only, TTS done in main thread)."""
             system = text_utils.build_cloud_system_prompt(emotion_label)
+            t_cloud_start = time.perf_counter()
             reply = cloud_llm.call_cloud_llm(
                 prompt=llm_prompt,
                 system=system,
                 timeout=10.0,
             )
+            t_cloud_end = time.perf_counter()
+            print(f"[time] cloud-llm-call: {t_cloud_end - t_cloud_start:.2f}s", flush=True)
             tts_text = reply.strip() if reply and not reply.startswith("(Cloud LLM") else text
             if reply:
                 print(f"[LLM-CLOUD] {reply}", flush=True)
