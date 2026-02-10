@@ -2,6 +2,7 @@
 venv/
 __pycache__/
 *.pyc
+.DS_Store
 model/
 models/
 emotion_onnx_int8/
