@@ -487,15 +487,49 @@ def _run_turn_brain_sentence(
 
     # ── CLOUD path ──────────────────────────────────────────────────────────
     if route_mode == "CLOUD":
+        # Phase 1: sLLM semantic filler (bridge while CLOUD LLM processes)
+        filler_audio: Optional[np.ndarray] = None
+        filler_sr: Optional[int] = None
+        if ENABLE_CLOUD_FILLER and args.ollama:
+            filler_system = text_utils.build_cloud_filler_system_prompt(emotion_label)
+            print("Ollama (CLOUD filler)...", flush=True)
+            t_fill_start = time.perf_counter()
+            filler_reply = llm_ollama.generate_ollama(
+                prompt=text,
+                model=args.ollama_model,
+                system=filler_system,
+                url=args.ollama_url,
+                num_predict=min(args.ollama_num_predict, 24),
+                temperature=args.ollama_temperature,
+                stop=["\n"],
+                keep_alive=args.ollama_keep_alive,
+                num_thread=args.ollama_num_thread,
+                num_ctx=args.ollama_num_ctx,
+                num_batch=args.ollama_num_batch,
+                max_sentences=1,
+                max_words=24,
+                timeout=10,
+            )
+            t_fill_end = time.perf_counter()
+            print(f"[time] ollama(cloud-filler): {t_fill_end - t_fill_start:.2f}s", flush=True)
+            if filler_reply and not filler_reply.startswith("(Ollama error"):
+                print(f"[LLM-CLOUD-FILLER] {filler_reply}", flush=True)
+                try:
+                    filler_audio, filler_sr = _synthesize_tts(tts, voice, filler_reply)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[error] TTS filler failed: {exc}", file=sys.stderr)
+
+        # Phase 2: main CLOUD answer via HTTP LLM
+        system = text_utils.build_cloud_system_prompt(emotion_label)
         reply = cloud_llm.call_cloud_llm(
             prompt=llm_prompt,
-            system=text_utils.CLOUD_DEFAULT_SYSTEM,
+            system=system,
             timeout=10.0,
         )
         tts_text = reply.strip() if reply and not reply.startswith("(Cloud LLM") else text
         if reply:
             print(f"[LLM-CLOUD] {reply}", flush=True)
-        
+
         t2b = time.perf_counter()
         print("Synthesizing (cloud)...", flush=True)
         try:
@@ -505,10 +539,13 @@ def _run_turn_brain_sentence(
             return tts_text, None, None
         t3 = time.perf_counter()
         print(f"[time] synthesize(cloud): {t3 - t2b:.2f}s", flush=True)
-        
+
+        # Combine filler + main into one audio for interruptible playback
+        if filler_audio is not None and filler_sr is not None and filler_sr == tts_sr:
+            tts_audio = np.concatenate([filler_audio, tts_audio]).astype(np.float32)
         if args.trim_start > 0.0:
             tts_audio = audio_io.trim_start_seconds(tts_audio, tts_sr, args.trim_start)
-        
+
         return tts_text, tts_audio, tts_sr
 
     # ── LOCAL path ──────────────────────────────────────────────────────────
@@ -615,9 +652,10 @@ def _warmup(args: Any, emotion_classifier: Optional[EmotionClassifierONNX]) -> N
         except Exception as exc:  # noqa: BLE001
             print(f"[Warmup] Ollama warning: {exc}", file=sys.stderr)
     
-    # 6. Cloud LLM (if configured)
+    # 6. Cloud LLM (if configured: Gemini or custom URL)
+    gemini_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
     cloud_url = (os.environ.get("CLOUD_LLM_URL") or "").strip()
-    if cloud_url:
+    if gemini_key or cloud_url:
         print("[Warmup] Testing cloud LLM connection...", flush=True)
         try:
             _ = cloud_llm.call_cloud_llm(

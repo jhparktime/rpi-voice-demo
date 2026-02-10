@@ -6,3 +6,8 @@ model/
 models/
 emotion_onnx_int8/
 
+# Secrets (never commit)
+.env
+.env.local
+.env.*.local
+

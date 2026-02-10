@@ -102,7 +102,29 @@ source venv/bin/activate
 python -m Demo --ollama --ollama-model smollm2:360m
 ```
 
-## CLOUD LLM HTTP hook
+## CLOUD LLM (Gemini or custom HTTP)
+
+### Option A: Google Gemini (free tier, e.g. Gemini 2.5 Flash)
+
+1. Get an API key: [Google AI Studio](https://aistudio.google.com/apikey) → Create API key.
+2. Set the key via **environment variable only** (do not commit it):
+
+   **Shell (current session):**
+   ```bash
+   export GEMINI_API_KEY="your-api-key-here"
+   python -m Demo --sentence-streaming
+   ```
+
+   **Or use a `.env` file (recommended, not committed):**
+   ```bash
+   # In project root, create .env (already in .gitignore)
+   echo 'GEMINI_API_KEY=your-api-key-here' > .env
+   ```
+   Then load it before running (e.g. `set -a && source .env && set +a` or use `python-dotenv` in your script).
+
+3. Optional: `CLOUD_LLM_MODEL` (default: `gemini-2.5-flash`).
+
+### Option B: Custom HTTP endpoint
 
 - `CLOUD_LLM_URL` (required) — Base URL for your HTTP LLM endpoint.
   POSTs JSON: `{ "prompt": "<user text>", "system": "<system prompt>" }`
