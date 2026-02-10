@@ -171,8 +171,8 @@ def _ensure_sherpa_stt(root: Path) -> bool:
 def _ensure_sherpa_tts(root: Path) -> bool:
     """Download and prepare sherpa-onnx English TTS into sherpa_tts/.
 
-    Uses the vits-coqui-en-ljspeech model (single-speaker English, LJ Speech)
-    plus a shared espeak-ng-data directory, matching the previous Pi setup.
+    Uses the vits-piper-en_US-amy-low model (Ultra-fast, Optimized for RPi 5)
+    plus a shared espeak-ng-data directory.
     Returns True if ready, False on failure (but does not raise).
     """
     tts_dir = root / "sherpa_tts"
@@ -180,6 +180,7 @@ def _ensure_sherpa_tts(root: Path) -> bool:
     tokens = tts_dir / "tokens.txt"
     data_dir = tts_dir / "espeak-ng-data"
 
+    # 이미 설치되어 있으면 패스
     if model.exists() and tokens.exists() and data_dir.exists():
         print(f"[info] sherpa-onnx TTS assets already present under {tts_dir}")
         return True
@@ -190,12 +191,14 @@ def _ensure_sherpa_tts(root: Path) -> bool:
     espeak_archive_path = tmp_dir / ESPEAK_DATA_ARCHIVE_NAME
 
     try:
+        # 모델 다운로드
         if not tts_archive_path.exists():
             _download_file(
                 SHERPA_TTS_ARCHIVE_URL,
                 tts_archive_path,
-                "sherpa-onnx English TTS (vits-coqui-en-ljspeech)",
+                "sherpa-onnx TTS (vits-piper-en_US-amy-low)",
             )
+        # espeak-ng-data 다운로드
         if not espeak_archive_path.exists():
             _download_file(
                 ESPEAK_DATA_ARCHIVE_URL,
@@ -206,7 +209,7 @@ def _ensure_sherpa_tts(root: Path) -> bool:
         print(f"[error] Failed to download sherpa-onnx TTS archives: {exc}", file=sys.stderr)
         return False
 
-    # Extract archives
+    # 압축 해제
     try:
         import tarfile
 
@@ -218,9 +221,10 @@ def _ensure_sherpa_tts(root: Path) -> bool:
         print(f"[error] Failed to extract sherpa-onnx TTS archives: {exc}", file=sys.stderr)
         return False
 
-    # Locate model directory: prefer vits-coqui-en-ljspeech/, but fall back to
-    # any directory with tokens.txt and at least one *.onnx file.
-    model_root = tmp_dir / "vits-coqui-en-ljspeech"
+    # [수정된 부분] 폴더 이름을 정확히 'vits-piper-en_US-amy-low'로 지정
+    model_root = tmp_dir / "vits-piper-en_US-amy-low"
+    
+    # 혹시 폴더명이 다를 경우를 대비한 자동 찾기 로직 (안전장치)
     if not model_root.exists():
         for p in tmp_dir.iterdir():
             if p.is_dir() and (p / "tokens.txt").exists() and list(p.glob("*.onnx")):
@@ -231,7 +235,7 @@ def _ensure_sherpa_tts(root: Path) -> bool:
         print(f"[error] Could not locate sherpa-onnx TTS model directory in {tmp_dir}", file=sys.stderr)
         return False
 
-    # Pick an ONNX model file (if multiple, choose the first sorted one).
+    # ONNX 파일 찾기 (보통 en_US-amy-low.onnx 이름임)
     onnx_candidates = sorted(model_root.glob("*.onnx"))
     if not onnx_candidates:
         print(f"[error] No ONNX model found under {model_root}", file=sys.stderr)
@@ -239,27 +243,36 @@ def _ensure_sherpa_tts(root: Path) -> bool:
     src_model = onnx_candidates[0]
     src_tokens = model_root / "tokens.txt"
 
-    # Locate espeak-ng-data directory (may live at top level after extraction).
+    # espeak-ng-data 찾기
     espeak_candidates = []
     for p in tmp_dir.rglob("espeak-ng-data"):
         if p.is_dir():
             espeak_candidates.append(p)
             break
+    
+    # Piper 모델의 경우 모델 폴더 안에 espeak-ng-data가 있을 수도 있음
+    if not espeak_candidates:
+         if (model_root / "espeak-ng-data").exists():
+             espeak_candidates.append(model_root / "espeak-ng-data")
+
     if not espeak_candidates:
         print(f"[error] espeak-ng-data directory not found under {tmp_dir}", file=sys.stderr)
         return False
     src_data = espeak_candidates[0]
 
+    # 최종 확인 및 복사
     if not (src_model.exists() and src_tokens.exists() and src_data.exists()):
         print(f"[error] Missing expected sherpa-onnx TTS files under {model_root}", file=sys.stderr)
         return False
 
     tts_dir.mkdir(parents=True, exist_ok=True)
     print(f"[info] Preparing sherpa-onnx TTS assets under {tts_dir}")
+    
+    # [중요] 여기서 이름을 'model.onnx'로 통일해서 복사해줍니다.
+    # 따라서 tts_sherpa.py에서는 경로를 항상 './sherpa_tts/model.onnx'로 쓰면 됩니다.
     shutil.copy2(src_model, model)
     shutil.copy2(src_tokens, tokens)
 
-    # Copy espeak-ng-data directory (merge if already exists)
     dst_data = tts_dir / "espeak-ng-data"
     if dst_data.exists():
         shutil.rmtree(dst_data)
