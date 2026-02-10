@@ -301,6 +301,44 @@ def _run_turn_ollama_or_direct(t0: float, args: Any, text: str, tts: Any, voice:
     print(f"[time] play: {t4 - t3:.2f}s (total: {t4 - t0:.2f}s)", flush=True)
 
 
+# ── Filler generation ──────────────────────────────────────────────────────
+
+def _generate_filler_ollama(
+    args: Any,
+    emotion_label: Optional[str],
+    timeout: float = 3.0,
+) -> str:
+    """Generate short Ollama filler phrase for Cloud waiting period.
+    
+    Returns empty string if Ollama unavailable or generation fails.
+    """
+    if not args.ollama:
+        return ""
+    
+    system = text_utils.build_cloud_filler_system_prompt(emotion_label)
+    try:
+        filler = llm_ollama.generate_ollama(
+            prompt="",  # Filler doesn't need user prompt
+            model=args.ollama_model,
+            system=system,
+            url=args.ollama_url,
+            num_predict=15,  # Short response
+            temperature=0.7,
+            stop=["\n"],
+            keep_alive=args.ollama_keep_alive,
+            num_thread=args.ollama_num_thread,
+            num_ctx=128,  # Minimal context
+            num_batch=args.ollama_num_batch,
+            max_sentences=1,
+            max_words=10,
+            timeout=timeout,
+        )
+        return filler.strip() if filler and not filler.startswith("(") else ""
+    except Exception as exc:  # noqa: BLE001
+        print(f"[Filler] generation failed: {exc}", flush=True, file=sys.stderr)
+        return ""
+
+
 # ── Brain: Emotion + Intent routing → LOCAL / CLOUD LLM → TTS ─────────────
 
 def _run_turn_brain(
@@ -378,43 +416,72 @@ def _run_turn_brain(
     # ── CLOUD path ──────────────────────────────────────────────────────
     if route_mode == "CLOUD":
         print("\n" + "="*60)
-        print("[CLOUD MODE] Starting...")
+        print("[CLOUD MODE] Starting (with Ollama filler)...")
         print("="*60 + "\n", flush=True)
         
-        # Direct Cloud LLM call
         system = text_utils.build_cloud_system_prompt(emotion_label)
         
-        t_llm_start = time.perf_counter()
-        reply = cloud_llm.call_cloud_llm(
-            prompt=llm_prompt,
-            system=system,
-            timeout=20.0,
-        )
-        t_llm_end = time.perf_counter()
+        # Parallel: Ollama filler + Cloud LLM
+        def _call_filler():
+            return _generate_filler_ollama(args, emotion_label, timeout=3.0)
         
-        cloud_text = reply.strip() if reply and not reply.startswith("(Cloud LLM") else text
+        def _call_cloud():
+            return cloud_llm.call_cloud_llm(
+                prompt=llm_prompt,
+                system=system,
+                timeout=20.0,
+            )
+        
+        t_parallel_start = time.perf_counter()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            fut_filler = executor.submit(_call_filler)
+            fut_cloud = executor.submit(_call_cloud)
+            
+            filler_text = fut_filler.result()
+            t_filler_ready = time.perf_counter()
+            
+            # Play filler immediately if available
+            filler_player = None
+            if filler_text:
+                print(f"[FILLER] {filler_text}")
+                print(f"[LATENCY] Filler generation: {t_filler_ready - t_parallel_start:.2f}s\n", flush=True)
+                try:
+                    filler_audio, filler_sr = _synthesize_tts(tts, voice, filler_text)
+                    filler_player = audio_io.AudioPlayer(
+                        filler_audio, filler_sr, 
+                        device=args.output_device, 
+                        volume=args.volume
+                    )
+                    filler_player.start()
+                    print("[FILLER] Playing...", flush=True)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[FILLER] TTS/playback failed: {exc}", flush=True, file=sys.stderr)
+                    filler_player = None
+            
+            # Wait for Cloud result
+            cloud_reply = fut_cloud.result()
+            t_cloud_ready = time.perf_counter()
+        
+        print(f"[LATENCY] Cloud LLM call: {t_cloud_ready - t_parallel_start:.2f}s")
+        
+        cloud_text = cloud_reply.strip() if cloud_reply and not cloud_reply.startswith("(") else text
         assistant_reply = cloud_text
         
-        # Latency logging
-        print(f"\n[LATENCY] Cloud LLM call: {t_llm_end - t_llm_start:.2f}s")
-        if reply:
-            print(f"[LLM-CLOUD] {reply}\n", flush=True)
+        if cloud_reply:
+            print(f"[LLM-CLOUD] {cloud_reply}\n", flush=True)
         
-        # Split cloud text into sentence chunks for streaming TTS
+        # Split and play with pipelined TTS
         chunks = text_utils.split_into_chunks(cloud_text)
         if not chunks:
-            # Fallback: treat whole text as single chunk
             chunks = [cloud_text]
         
-        print(f"[CLOUD] Streaming {len(chunks)} chunk(s) with pipelined TTS...\n", flush=True)
+        print(f"[CLOUD] Streaming {len(chunks)} chunk(s)...\n", flush=True)
         
-        # Pipelined TTS (no filler)
         t_tts_start = time.perf_counter()
-        _, _ = _play_chunks_pipelined(chunks, tts, voice, args, filler_player=None)
+        _, _ = _play_chunks_pipelined(chunks, tts, voice, args, filler_player=filler_player)
         t_tts_end = time.perf_counter()
         
         print(f"\n[LATENCY] Total TTS+Play: {t_tts_end - t_tts_start:.2f}s")
-        print(f"[LATENCY] Total (LLM+TTS+Play): {t_tts_end - t_llm_start:.2f}s")
         print(f"[LATENCY] End-to-end: {t_tts_end - t0:.2f}s")
         print("="*60 + "\n", flush=True)
         
@@ -545,42 +612,71 @@ def _run_turn_brain_sentence(
     # ── CLOUD path ──────────────────────────────────────────────────────────
     if route_mode == "CLOUD":
         print("\n" + "="*60)
-        print("[CLOUD MODE] Starting...")
+        print("[CLOUD MODE] Starting (with Ollama filler)...")
         print("="*60 + "\n", flush=True)
         
-        # Direct Cloud LLM call
         system = text_utils.build_cloud_system_prompt(emotion_label)
         
-        t_llm_start = time.perf_counter()
-        reply = cloud_llm.call_cloud_llm(
-            prompt=llm_prompt,
-            system=system,
-            timeout=10.0,
-        )
-        t_llm_end = time.perf_counter()
+        # Parallel: Ollama filler + Cloud LLM
+        def _call_filler():
+            return _generate_filler_ollama(args, emotion_label, timeout=3.0)
         
-        cloud_text = reply.strip() if reply and not reply.startswith("(Cloud LLM") else text
+        def _call_cloud():
+            return cloud_llm.call_cloud_llm(
+                prompt=llm_prompt,
+                system=system,
+                timeout=10.0,
+            )
         
-        # Latency logging
-        print(f"\n[LATENCY] Cloud LLM call: {t_llm_end - t_llm_start:.2f}s")
-        if reply:
-            print(f"[LLM-CLOUD] {reply}\n", flush=True)
+        t_parallel_start = time.perf_counter()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            fut_filler = executor.submit(_call_filler)
+            fut_cloud = executor.submit(_call_cloud)
+            
+            filler_text = fut_filler.result()
+            t_filler_ready = time.perf_counter()
+            
+            # Play filler immediately if available
+            filler_player = None
+            if filler_text:
+                print(f"[FILLER] {filler_text}")
+                print(f"[LATENCY] Filler generation: {t_filler_ready - t_parallel_start:.2f}s\n", flush=True)
+                try:
+                    filler_audio, filler_sr = _synthesize_tts(tts, voice, filler_text)
+                    filler_player = audio_io.AudioPlayer(
+                        filler_audio, filler_sr, 
+                        device=args.output_device, 
+                        volume=args.volume
+                    )
+                    filler_player.start()
+                    print("[FILLER] Playing...", flush=True)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[FILLER] TTS/playback failed: {exc}", flush=True, file=sys.stderr)
+                    filler_player = None
+            
+            # Wait for Cloud result
+            cloud_reply = fut_cloud.result()
+            t_cloud_ready = time.perf_counter()
         
-        # Split cloud text into sentence chunks for streaming TTS
+        print(f"[LATENCY] Cloud LLM call: {t_cloud_ready - t_parallel_start:.2f}s")
+        
+        cloud_text = cloud_reply.strip() if cloud_reply and not cloud_reply.startswith("(") else text
+        
+        if cloud_reply:
+            print(f"[LLM-CLOUD] {cloud_reply}\n", flush=True)
+        
+        # Split and play with pipelined TTS
         chunks = text_utils.split_into_chunks(cloud_text)
         if not chunks:
-            # Fallback: treat whole text as single chunk
             chunks = [cloud_text]
         
-        print(f"[CLOUD] Streaming {len(chunks)} chunk(s) with pipelined TTS...\n", flush=True)
+        print(f"[CLOUD] Streaming {len(chunks)} chunk(s)...\n", flush=True)
         
-        # Pipelined TTS (no filler)
         t_tts_start = time.perf_counter()
-        combined_audio_chunks, sample_rate = _play_chunks_pipelined(chunks, tts, voice, args, filler_player=None)
+        combined_audio_chunks, sample_rate = _play_chunks_pipelined(chunks, tts, voice, args, filler_player=filler_player)
         t_tts_end = time.perf_counter()
         
         print(f"\n[LATENCY] Total TTS+Play: {t_tts_end - t_tts_start:.2f}s")
-        print(f"[LATENCY] Total (LLM+TTS+Play): {t_tts_end - t_llm_start:.2f}s")
         print("="*60 + "\n", flush=True)
         
         # Combine all chunks into single audio array for return
