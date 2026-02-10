@@ -21,6 +21,8 @@ import time
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from queue import Queue
+from threading import Thread
 from typing import Any, Iterable, List, Optional, Tuple
 
 import numpy as np
@@ -54,6 +56,84 @@ def _synthesize_tts(tts: Any, voice: str, text: str, speed: float = 1.0) -> Tupl
     if sr <= 0 or audio.size == 0:
         raise RuntimeError("sherpa-onnx TTS synthesis failed")
     return audio, sr
+
+
+def _play_chunks_pipelined(
+    chunks: List[str],
+    tts: Any,
+    voice: str,
+    args: Any,
+    filler_player: Optional[audio_io.AudioPlayer] = None,
+) -> List[np.ndarray]:
+    """Play text chunks with pipelined TTS to eliminate gaps.
+    
+    Producer thread generates TTS for all chunks in background.
+    Main thread plays each chunk as soon as it's ready.
+    First chunk waits for filler to finish.
+    
+    Returns list of audio arrays for each chunk (for logging/debugging).
+    """
+    if not chunks:
+        return []
+    
+    tts_queue: Queue = Queue(maxsize=2)  # Buffer up to 2 chunks ahead
+    audio_chunks = []
+    
+    def _tts_producer():
+        """Background thread: TTS all chunks and push to queue."""
+        for i, chunk in enumerate(chunks):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            try:
+                t_start = time.perf_counter()
+                chunk_audio, chunk_sr = _synthesize_tts(tts, voice, chunk)
+                t_end = time.perf_counter()
+                print(f"[TTS-producer] chunk-{i+1} synthesized in {t_end - t_start:.2f}s", flush=True)
+                tts_queue.put((i, chunk_audio, chunk_sr))
+            except Exception as exc:  # noqa: BLE001
+                print(f"[error] TTS chunk {i+1} failed: {exc}", file=sys.stderr)
+        tts_queue.put(None)  # Sentinel: all chunks done
+    
+    # Start producer thread
+    producer = Thread(target=_tts_producer, daemon=True)
+    producer.start()
+    
+    # Consumer (main thread): play chunks as they become ready
+    first_chunk = True
+    while True:
+        item = tts_queue.get()
+        if item is None:
+            break
+        
+        chunk_idx, chunk_audio, chunk_sr = item
+        
+        # First chunk: wait for filler to finish
+        if first_chunk and filler_player and filler_player.is_playing():
+            print("[Cloud] Waiting for filler to finish...", flush=True)
+            filler_player.wait()
+            first_chunk = False
+        
+        # Trim start only on first chunk
+        if chunk_idx == 0 and args.trim_start > 0.0:
+            chunk_audio = audio_io.trim_start_seconds(chunk_audio, chunk_sr, args.trim_start)
+        
+        # Play this chunk (blocking)
+        print(f"Playing chunk {chunk_idx+1}/{len(chunks)}...", flush=True)
+        t_play_start = time.perf_counter()
+        try:
+            audio_io.play_audio(chunk_audio, chunk_sr, args.output_device, volume=args.volume)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[error] playback chunk {chunk_idx+1} failed: {exc}", file=sys.stderr)
+        t_play_end = time.perf_counter()
+        print(f"[time] chunk-{chunk_idx+1} play: {t_play_end - t_play_start:.2f}s", flush=True)
+        
+        audio_chunks.append(chunk_audio)
+    
+    # Wait for producer thread to finish
+    producer.join(timeout=5.0)
+    
+    return audio_chunks
 
 
 # ── Turn handlers (ONNX LLM, Ollama stream, Ollama single, Brain router) ──
@@ -374,36 +454,10 @@ def _run_turn_brain(
             # Fallback: treat whole text as single chunk
             chunks = [cloud_text]
         
-        print(f"[Cloud] Streaming {len(chunks)} chunk(s)...", flush=True)
+        print(f"[Cloud] Streaming {len(chunks)} chunk(s) with pipelined TTS...", flush=True)
         
-        # Process chunks: TTS + play each sequentially (blocking)
-        for i, chunk in enumerate(chunks):
-            chunk = chunk.strip()
-            if not chunk:
-                continue
-            
-            # TTS this chunk
-            t_chunk_start = time.perf_counter()
-            try:
-                chunk_audio, chunk_sr = _synthesize_tts(tts, voice, chunk)
-            except Exception as exc:  # noqa: BLE001
-                print(f"[error] TTS chunk {i+1} failed: {exc}", file=sys.stderr)
-                continue
-            
-            t_chunk_tts = time.perf_counter()
-            
-            # Play this chunk (blocking)
-            if args.trim_start > 0.0 and i == 0:
-                chunk_audio = audio_io.trim_start_seconds(chunk_audio, chunk_sr, args.trim_start)
-            
-            print(f"Playing chunk {i+1}/{len(chunks)}...", flush=True)
-            try:
-                audio_io.play_audio(chunk_audio, chunk_sr, args.output_device, volume=args.volume)
-            except Exception as exc:  # noqa: BLE001
-                print(f"[error] playback chunk {i+1} failed: {exc}", file=sys.stderr)
-            
-            t_chunk_end = time.perf_counter()
-            print(f"[time] chunk-{i+1}: TTS={t_chunk_tts - t_chunk_start:.2f}s, total={t_chunk_end - t_chunk_start:.2f}s", flush=True)
+        # Use pipelined TTS: no filler_player since filler already played (blocking)
+        _play_chunks_pipelined(chunks, tts, voice, args, filler_player=None)
         
         t4 = time.perf_counter()
         print(f"[time] total: {t4 - t0:.2f}s", flush=True)
@@ -613,50 +667,15 @@ def _run_turn_brain_sentence(
             # Fallback: treat whole text as single chunk
             chunks = [cloud_text]
         
-        print(f"[Cloud] Streaming {len(chunks)} chunk(s)...", flush=True)
+        print(f"[Cloud] Streaming {len(chunks)} chunk(s) with pipelined TTS...", flush=True)
         
-        # Process chunks: TTS + play each sequentially
-        combined_audio_chunks = []
-        sample_rate = None
-        
-        for i, chunk in enumerate(chunks):
-            chunk = chunk.strip()
-            if not chunk:
-                continue
-            
-            # TTS this chunk
-            t_chunk_start = time.perf_counter()
-            try:
-                chunk_audio, chunk_sr = _synthesize_tts(tts, voice, chunk)
-            except Exception as exc:  # noqa: BLE001
-                print(f"[error] TTS chunk {i+1} failed: {exc}", file=sys.stderr)
-                continue
-            
-            if sample_rate is None:
-                sample_rate = chunk_sr
-            
-            t_chunk_tts = time.perf_counter()
-            
-            # For first chunk: wait for filler to finish
-            if i == 0 and filler_player and filler_player.is_playing():
-                print("[Cloud] Waiting for filler to finish...", flush=True)
-                filler_player.wait()
-            
-            # Play this chunk (blocking)
-            if args.trim_start > 0.0 and i == 0:
-                chunk_audio = audio_io.trim_start_seconds(chunk_audio, chunk_sr, args.trim_start)
-            
-            print(f"Playing chunk {i+1}/{len(chunks)}...", flush=True)
-            audio_io.play_audio(chunk_audio, chunk_sr, args.output_device, volume=args.volume)
-            
-            t_chunk_end = time.perf_counter()
-            print(f"[time] chunk-{i+1}: TTS={t_chunk_tts - t_chunk_start:.2f}s, total={t_chunk_end - t_chunk_start:.2f}s", flush=True)
-            
-            # Collect audio for return value (combined)
-            combined_audio_chunks.append(chunk_audio)
+        # Use pipelined TTS with filler_player
+        combined_audio_chunks = _play_chunks_pipelined(chunks, tts, voice, args, filler_player)
         
         # Combine all chunks into single audio array for return
-        if combined_audio_chunks and sample_rate:
+        if combined_audio_chunks:
+            # Assume all chunks have same sample rate (sherpa-onnx TTS)
+            sample_rate = tts_sherpa.SAMPLE_RATE
             combined_audio = np.concatenate(combined_audio_chunks)
             return cloud_text, combined_audio, sample_rate
         else:

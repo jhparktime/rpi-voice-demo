@@ -448,6 +448,12 @@ def stream_recognize_sentences(
             dtype="float32",
             device=input_device,
         ) as mic:
+            # Warm-up: discard first 3 chunks to avoid cutting off first words
+            print("[sherpa-sentence] warming up mic...", flush=True)
+            for _ in range(3):
+                mic.read(chunk_samples)
+            print("[sherpa-sentence] ready, listening...", flush=True)
+            
             while True:
                 elapsed_total = time.perf_counter() - t_session_start
                 if elapsed_total >= max_total_seconds:
