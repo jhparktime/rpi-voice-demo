@@ -328,6 +328,9 @@ def vad_stream_recognize_one(
 
     # silero-vad window size (must match config)
     window_size = 512
+    # Warm-up: number of windows to read and discard before feeding VAD/ASR.
+    # This helps avoid cutting off the first word on some devices.
+    warmup_windows = 5  # ~0.16s at 16kHz
     speech_active = False
     stream = None
     text = ""
@@ -342,6 +345,16 @@ def vad_stream_recognize_one(
             dtype="float32",
             device=input_device,
         ) as mic:
+            # Warm-up: read and discard a few windows before starting VAD/ASR
+            try:
+                print("[sherpa-vad] warming up mic...", flush=True)
+                for _ in range(warmup_windows):
+                    mic.read(window_size)
+                print("[sherpa-vad] ready, detecting speech...", flush=True)
+            except Exception:
+                # If warm-up fails, continue anyway; better to have STT than crash.
+                print("[sherpa-vad] warm-up skipped due to error.", flush=True)
+
             while True:
                 elapsed = time.perf_counter() - t0
                 if elapsed >= max_seconds:
