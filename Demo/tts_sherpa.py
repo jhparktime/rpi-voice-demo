@@ -59,7 +59,7 @@ def _init_tts() -> Optional["sherpa_onnx.OfflineTts"]:  # type: ignore[name-defi
                 kitten=sherpa_onnx.OfflineTtsKittenModelConfig(),
                 provider="cpu",
                 debug=False,
-                num_threads=1,
+                num_threads=2,
             ),
             rule_fsts="",
             max_num_sentences=1,
