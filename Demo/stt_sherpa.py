@@ -9,7 +9,7 @@ Provides four recognition modes:
   1. transcribe_sherpa(audio, sr)             – feed a pre-recorded buffer in chunks
   2. stream_recognize_until_endpoint(...)      – live mic with auto endpoint (Phase 2)
   3. vad_stream_recognize_one(...)             – VAD + streaming for one utterance (Phase 3)
-  4. stream_recognize_sentences(...)           – sentence-by-sentence streaming with 0.8s silence
+  4. stream_recognize_sentences(...)           – sentence-by-sentence streaming with 1.5s silence
 """
 from __future__ import annotations
 
@@ -426,14 +426,14 @@ def vad_stream_recognize_one(
 
 def stream_recognize_sentences(
     input_device: Optional[int] = None,
-    sentence_silence_threshold: float = 0.8,
+    sentence_silence_threshold: float = 1.5,
     max_total_seconds: float = 120.0,
 ) -> Generator[Tuple[str, float], None, None]:
-    """Stream mic continuously, yield each sentence when 0.8s silence detected.
+    """Stream mic continuously, yield each sentence when 1.5s silence detected.
 
     This enables natural multi-sentence conversations:
-    - User speaks sentence 1 → pause 0.8s → yield sentence 1
-    - User continues with sentence 2 → pause 0.8s → yield sentence 2
+    - User speaks sentence 1 → pause 1.5s → yield sentence 1
+    - User continues with sentence 2 → pause 1.5s → yield sentence 2
     - Continues until max_total_seconds or external stop
 
     Yields (sentence_text, elapsed_since_start) tuples.

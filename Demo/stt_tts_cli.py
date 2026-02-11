@@ -41,11 +41,11 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--sentence-streaming", action="store_true", default=False,
-        help="Sentence-by-sentence streaming mode: each sentence (0.8s silence) triggers immediate processing.",
+        help="Sentence-by-sentence streaming mode: each sentence (1.5s silence) triggers immediate processing.",
     )
     parser.add_argument(
-        "--sentence-silence", type=float, default=0.8,
-        help="Silence duration (seconds) to detect sentence boundaries in sentence-streaming mode (default 0.8).",
+        "--sentence-silence", type=float, default=1.5,
+        help="Silence duration (seconds) to detect sentence boundaries in sentence-streaming mode (default 1.5).",
     )
 
     # --- Ollama (LOCAL LLM) ---

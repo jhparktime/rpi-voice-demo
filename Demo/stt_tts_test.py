@@ -1143,7 +1143,7 @@ def _main_loop_sentence_streaming(
     """Sentence-by-sentence streaming loop with interruptible TTS.
     
     User presses Enter once → continuous listening:
-    - Each sentence (0.8s silence) → brain → TTS (interruptible)
+    - Each sentence (1.5s silence) → brain → TTS (interruptible)
     - New sentence stops previous TTS immediately
     - Ctrl+C to exit
     """

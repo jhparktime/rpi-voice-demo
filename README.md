@@ -7,7 +7,7 @@ Voice demo for Raspberry Pi — sherpa-onnx based STT/TTS with emotion-aware
 intent routing and natural conversation flow:
 
 - **STT**: sherpa-onnx streaming Zipformer (OnlineRecognizer, 4 modes)
-  - `--sentence-streaming`: sentence-by-sentence mode — each 0.8s pause triggers processing
+  - `--sentence-streaming`: sentence-by-sentence mode — each 1.5s pause triggers processing
   - `--streaming` (default): Enter → mic stream → endpoint auto-detection → text
   - `--no-streaming`: Enter → fixed N-second recording → chunked transcription
   - `--vad`: always-listening — silero-vad detects speech automatically, no Enter needed
@@ -55,13 +55,13 @@ python -m Demo --no-streaming --record-seconds 3
 
 | Flag | Trigger | Description |
 |------|---------|-------------|
-| `--sentence-streaming` | Enter key | Continuous listening: each sentence (0.8s silence) triggers immediate processing. Most natural for multi-sentence conversations. |
+| `--sentence-streaming` | Enter key | Continuous listening: each sentence (1.5s silence) triggers immediate processing. Most natural for multi-sentence conversations. |
 | `--streaming` (default) | Enter key | Opens mic, streams to OnlineRecognizer, endpoint detection auto-stops |
 | `--no-streaming` | Enter key | Records for `--record-seconds`, then feeds entire buffer in chunks |
 | `--vad` | Automatic | Always-listening: silero-vad detects speech start/end, no Enter needed |
 
 Common options:
-- `--sentence-silence 0.8` — silence duration (seconds) for sentence boundaries in `--sentence-streaming` mode (default 0.8s)
+- `--sentence-silence 1.5` — silence duration (seconds) for sentence boundaries in `--sentence-streaming` mode (default 1.5s)
 - `--max-listen-seconds 15` — timeout for streaming/VAD modes (default 15s)
 - `--record-seconds 3` — duration for `--no-streaming` mode (default 3s)
 
