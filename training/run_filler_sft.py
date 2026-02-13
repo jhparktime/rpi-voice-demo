@@ -10,8 +10,8 @@ from typing import Any, Dict, List
 import yaml
 from datasets import load_dataset
 from peft import LoraConfig
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
-from trl import SFTTrainer
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from trl import SFTConfig, SFTTrainer
 
 
 def _load_config(path: str) -> Dict[str, Any]:
@@ -113,7 +113,7 @@ def main() -> None:
         task_type="CAUSAL_LM",
     )
 
-    training_args = TrainingArguments(
+    training_args = SFTConfig(
         output_dir=output_dir,
         logging_dir=out_cfg.get("logging_dir"),
         num_train_epochs=float(train_cfg["num_train_epochs"]),
@@ -128,23 +128,23 @@ def main() -> None:
         eval_steps=int(train_cfg["eval_steps"]),
         save_steps=int(train_cfg["save_steps"]),
         save_total_limit=int(train_cfg["save_total_limit"]),
-        evaluation_strategy=str(train_cfg["evaluation_strategy"]),
+        eval_strategy=str(train_cfg["evaluation_strategy"]),
         save_strategy=str(train_cfg["save_strategy"]),
         bf16=bool(train_cfg["bf16"]),
         fp16=bool(train_cfg["fp16"]),
         gradient_checkpointing=bool(train_cfg["gradient_checkpointing"]),
         seed=int(train_cfg["seed"]),
         report_to="none",
+        dataset_text_field="text",
+        max_length=256,
     )
 
     trainer = SFTTrainer(
         model=model,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         train_dataset=datasets.train_dataset,
         eval_dataset=datasets.eval_dataset,
         peft_config=peft_config,
-        dataset_text_field="text",
-        max_seq_length=256,
         args=training_args,
     )
 
