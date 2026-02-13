@@ -6,9 +6,9 @@ __pycache__/
 model/
 models/
 emotion_onnx_int8/
+outputs/
 
 # Secrets (never commit)
 .env
 .env.local
 .env.*.local
-
