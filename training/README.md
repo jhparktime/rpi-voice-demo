@@ -86,6 +86,34 @@ pip install -r training/requirements-finetune.txt
 python training/run_filler_sft.py --config training/configs/smollm2_135m_filler_lora.yaml
 ```
 
+## Colab
+
+For GPU-based training on Colab, use:
+
+- `training/README_COLAB.md`
+- `training/configs/smollm2_135m_filler_lora_colab.yaml`
+- `training/requirements-colab.txt`
+
+Research/implementation checklist:
+
+- `training/CHECKLIST_RESEARCH.md`
+
+## Benchmark (Base vs LoRA)
+
+```bash
+python training/eval_filler_benchmark.py \
+  --base-model HuggingFaceTB/SmolLM2-135M-Instruct \
+  --adapter-dir outputs/smollm2-135m-filler-lora \
+  --device cpu \
+  --prompt-multiplier 3
+```
+
+This writes `outputs/smollm2-135m-filler-lora/benchmark.json` with:
+- rule pass rate (6-12 words, no answering patterns),
+- latency stats (avg, p95),
+- diversity (`unique_output_ratio`, `distinct_1`, `distinct_2`),
+- topic-copy rate for semantic bridge behavior.
+
 ## Suggested first experiment
 
 1. Start with template-heavy data (safe and deterministic).

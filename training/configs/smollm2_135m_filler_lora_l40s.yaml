@@ -1,0 +1,54 @@
+model_name_or_path: HuggingFaceTB/SmolLM2-135M-Instruct
+
+data:
+  train_file: training/data/filler_train_l40s.jsonl
+  val_file: training/data/filler_val_l40s.jsonl
+  max_train_samples: null
+  max_eval_samples: null
+  max_seq_length: 192
+  max_target_words: 16
+
+output:
+  output_dir: outputs/smollm2-135m-filler-lora-l40s
+  logging_dir: outputs/smollm2-135m-filler-lora-l40s/logs
+
+training:
+  num_train_epochs: 2
+  max_steps: -1
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 1
+  learning_rate: 2.0e-4
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.03
+  weight_decay: 0.0
+  logging_steps: 20
+  eval_steps: 100
+  save_steps: 100
+  save_total_limit: 2
+  evaluation_strategy: steps
+  save_strategy: steps
+  load_best_model_at_end: true
+  metric_for_best_model: eval_loss
+  greater_is_better: false
+  bf16: false
+  fp16: true
+  gradient_checkpointing: false
+  seed: 42
+
+lora:
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+runtime:
+  local_files_only: false
+  use_fast_tokenizer: true

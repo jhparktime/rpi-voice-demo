@@ -15,15 +15,48 @@ import requests
 
 SYSTEM_PROMPT = (
     "You are a realtime voice filler generator. Output exactly one short bridge sentence "
-    "(max 12 tokens). Do not answer the user. Do not add facts."
+    "(6-14 words, max 16 tokens). Do not answer the user. Do not add facts."
 )
 
 SAFE_FILLERS = [
-    "One moment, checking that now.",
-    "Just a sec, I am on it.",
-    "Okay, give me a moment.",
-    "Let me check quickly.",
-    "Got it, one second please.",
+    "Give me a moment while I check that for you.",
+    "One second, I am pulling that together now.",
+    "Let me take a moment to review that clearly.",
+    "Okay, give me a second to verify the details.",
+    "Got it, I will check that and get right back.",
+    "One moment, I am organizing the key points now.",
+    "Let me quickly review that before I respond.",
+    "I am on it, give me a brief second.",
+    "Give me a second while I validate that.",
+    "One moment while I gather that for you.",
+]
+
+FILLER_OPENERS = [
+    "Give me a moment",
+    "One moment please",
+    "Just a second",
+    "Let me check",
+    "I am on it",
+    "Thanks, one moment",
+    "Got it, one moment",
+    "Okay, one second",
+]
+
+FILLER_ACTIONS = [
+    "while I check",
+    "while I review",
+    "while I look into",
+    "while I verify",
+    "while I organize",
+    "while I gather",
+]
+
+FILLER_ENDINGS = [
+    "this for you.",
+    "that now.",
+    "the details for you.",
+    "it carefully.",
+    "the key points clearly.",
 ]
 
 USER_UTTERANCES = [
@@ -37,12 +70,69 @@ USER_UTTERANCES = [
     "I feel anxious about tomorrow.",
 ]
 
+SYNTH_ACTIONS = [
+    "explain",
+    "summarize",
+    "translate",
+    "compare",
+    "debug",
+    "calculate",
+    "plan",
+    "outline",
+    "review",
+    "clarify",
+]
+
+SYNTH_TOPICS = [
+    "binary search",
+    "SQL joins",
+    "photosynthesis",
+    "quantum tunneling",
+    "IPv6",
+    "transformer models",
+    "cache coherence",
+    "loan interest",
+    "thermodynamics",
+    "vaccines",
+    "Bayes theorem",
+    "Git rebase",
+    "network latency",
+    "distributed locks",
+    "Docker networking",
+    "Kubernetes pods",
+    "time complexity",
+    "prompt engineering",
+    "A/B testing",
+    "REST authentication",
+]
+
+SYNTH_CONSTRAINTS = [
+    "in simple terms",
+    "for a beginner",
+    "with one example",
+    "step by step",
+    "in under two minutes",
+    "for an interview context",
+    "for practical use",
+    "for production systems",
+    "for a school assignment",
+    "for a quick review",
+]
+
 DEFAULT_OLLAMA_URL = "http://localhost:11434/api/generate"
 DEFAULT_OLLAMA_MODEL = "smollm2:360m"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
 FORBIDDEN_PATTERNS = [
+    re.compile(r"\bhere(?:'s| is)\b", re.IGNORECASE),
+    re.compile(r"\bthe answer\b", re.IGNORECASE),
+    re.compile(r"\bsql query\b", re.IGNORECASE),
+    re.compile(r"\btranslate(?:d|s|)\b", re.IGNORECASE),
+    re.compile(r"\bsummar(?:y|ize|ized)\b", re.IGNORECASE),
+    re.compile(r"\bi'm not sure\b", re.IGNORECASE),
+    re.compile(r"\bjust kidding\b", re.IGNORECASE),
+    re.compile(r"\bsorry\b", re.IGNORECASE),
     re.compile(r"\bthe answer is\b", re.IGNORECASE),
     re.compile(r"\bit is\b", re.IGNORECASE),
     re.compile(r"\bit's\b", re.IGNORECASE),
@@ -149,13 +239,101 @@ def load_source_utterances(source_file: str | None, include_anchors: bool) -> Li
     return uniq
 
 
+def build_synthetic_utterances(count: int, seed: int) -> List[str]:
+    """Build diverse synthetic user utterances for filler training scale-up."""
+    rng = random.Random(seed)
+    templates = [
+        "Can you {action} {topic} {constraint}?",
+        "Please {action} {topic} {constraint}.",
+        "I need you to {action} {topic} {constraint}.",
+        "Could you quickly {action} {topic} {constraint}?",
+        "Help me {action} {topic} {constraint}.",
+        "For my project, {action} {topic} {constraint}.",
+        "Before we proceed, {action} {topic} {constraint}.",
+    ]
+    out: List[str] = []
+    for _ in range(max(0, count)):
+        t = rng.choice(templates)
+        out.append(
+            t.format(
+                action=rng.choice(SYNTH_ACTIONS),
+                topic=rng.choice(SYNTH_TOPICS),
+                constraint=rng.choice(SYNTH_CONSTRAINTS),
+            ).strip()
+        )
+    return out
+
+
 def _extract_topic_hint(user_text: str) -> str:
+    low_text = user_text.lower()
+    for topic in sorted(SYNTH_TOPICS, key=len, reverse=True):
+        if topic in low_text:
+            return topic
+
     words = re.findall(r"[A-Za-z']+", user_text)
     if not words:
         return "that"
-    keywords = [w.lower() for w in words if len(w) >= 4]
+    stop = {
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "whom",
+        "why",
+        "how",
+        "please",
+        "could",
+        "would",
+        "should",
+        "can",
+        "you",
+        "this",
+        "that",
+        "into",
+        "from",
+        "about",
+        "with",
+        "just",
+        "very",
+        "really",
+        "please",
+        "quickly",
+        "project",
+        "before",
+        "need",
+        "beginner",
+        "simple",
+        "terms",
+        "example",
+        "step",
+        "assignment",
+        "interview",
+        "context",
+        "practical",
+        "production",
+        "school",
+        "review",
+        "under",
+        "minutes",
+        "quick",
+        "help",
+        "proceed",
+        "explain",
+        "summarize",
+        "translate",
+        "compare",
+        "debug",
+        "calculate",
+        "plan",
+        "outline",
+        "clarify",
+    }
+    keywords = [w.lower() for w in words if len(w) >= 4 and w.lower() not in stop]
     if not keywords:
         return "that"
+    if len(keywords) >= 2:
+        return f"{keywords[0]} {keywords[1]}"
     return keywords[0]
 
 
@@ -164,14 +342,27 @@ def generate_template_candidate(user_text: str, topic_aware: bool) -> str:
         return random.choice(SAFE_FILLERS)
 
     topic = _extract_topic_hint(user_text)
-    topic_templates = [
-        f"One moment, checking {topic} now.",
-        f"Okay, let me review {topic}.",
-        f"Got it, checking {topic} quickly.",
-        "One moment, checking that now.",
-        "Just a sec, I am on it.",
+
+    # Blend curated templates with compositional patterns for diversity.
+    curated = [
+        f"One moment while I check the details on {topic}.",
+        f"Give me a second to review {topic} clearly.",
+        f"I am checking {topic} and will be right back.",
+        "One moment, I am checking that now.",
+        "Give me a moment while I check that for you.",
+        "Let me quickly check that for you.",
     ]
-    return random.choice(topic_templates)
+    if random.random() < 0.4:
+        return random.choice(curated)
+
+    opener = random.choice(FILLER_OPENERS)
+    action = random.choice(FILLER_ACTIONS)
+    ending = random.choice(FILLER_ENDINGS)
+    if random.random() < 0.7 and topic != "that":
+        candidate = f"{opener} {action} {topic} {ending}"
+    else:
+        candidate = f"{opener} {action} {ending}"
+    return _normalize_text(candidate)
 
 
 def _call_ollama(prompt: str, system: str, model: str, url: str, timeout: float) -> str:
@@ -279,7 +470,7 @@ def _teacher_prompt(user_text: str) -> str:
     return (
         "User said: "
         + repr(user_text)
-        + "\nReturn ONLY one short bridge sentence (3-8 words). "
+        + "\nReturn ONLY one short bridge sentence (6-14 words). "
         + "Do not answer. No facts. No names. No numbers."
     )
 
@@ -309,7 +500,7 @@ def generate_teacher_candidate(
     return ""
 
 
-def validate_candidate(text: str, max_words: int, strict_filter: bool) -> CandidateResult:
+def validate_candidate(text: str, min_words: int, max_words: int, strict_filter: bool) -> CandidateResult:
     t = _normalize_text(text)
     if not t:
         return CandidateResult(False, t, "empty")
@@ -319,6 +510,8 @@ def validate_candidate(text: str, max_words: int, strict_filter: bool) -> Candid
         return CandidateResult(False, t, "contains_question_mark")
 
     words = t.split()
+    if len(words) < min_words:
+        return CandidateResult(False, t, "too_few_words")
     if len(words) > max_words:
         return CandidateResult(False, t, "too_many_words")
 
@@ -332,6 +525,8 @@ def validate_candidate(text: str, max_words: int, strict_filter: bool) -> Candid
         for pat in FORBIDDEN_PATTERNS:
             if pat.search(t):
                 return CandidateResult(False, t, f"forbidden_pattern:{pat.pattern}")
+        if re.search(r"\b(that now|it carefully now|the key points now)\b", t, re.IGNORECASE):
+            return CandidateResult(False, t, "awkward_phrase_pattern")
         # heuristic: avoid obvious entities in very short fillers
         caps = re.findall(r"\b[A-Z][a-z]{2,}\b", t)
         if len(caps) >= 2:
@@ -351,6 +546,21 @@ def _dedupe_records(records: Sequence[Dict[str, object]]) -> List[Dict[str, obje
     return out
 
 
+def _cap_phrase_frequency(records: List[Dict[str, object]], max_per_phrase: int) -> List[Dict[str, object]]:
+    if max_per_phrase <= 0:
+        return records
+    counts: Dict[str, int] = {}
+    out: List[Dict[str, object]] = []
+    for r in records:
+        key = str(r["assistant"]).strip().lower()
+        c = counts.get(key, 0)
+        if c >= max_per_phrase:
+            continue
+        counts[key] = c + 1
+        out.append(r)
+    return out
+
+
 def _write_jsonl(path: Path, rows: Sequence[Dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
@@ -365,11 +575,14 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--source-file", type=str, default=None, help="Optional .txt/.json/.jsonl source utterances")
     parser.add_argument("--include-anchors", action="store_true", default=True, help="Include dataset/anchors.json utterances")
+    parser.add_argument("--synthetic-sources", type=int, default=1200, help="Number of synthetic source utterances to add")
     parser.add_argument("--teacher-backend", choices=["template", "ollama", "cloud"], default="template")
     parser.add_argument("--teacher-model", type=str, default=None, help="Teacher model name (backend dependent)")
     parser.add_argument("--ollama-url", type=str, default=DEFAULT_OLLAMA_URL)
     parser.add_argument("--n-candidates", type=int, default=3, help="Candidates per user utterance")
-    parser.add_argument("--max-words", type=int, default=12)
+    parser.add_argument("--min-words", type=int, default=6)
+    parser.add_argument("--max-words", type=int, default=16)
+    parser.add_argument("--max-per-phrase", type=int, default=6, help="Cap repeated identical assistant phrases")
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--strict-filter", action="store_true", default=True)
     parser.add_argument("--topic-aware-templates", action="store_true", default=True)
@@ -382,6 +595,17 @@ def main() -> None:
     total_target = args.train_size + args.val_size
 
     sources = load_source_utterances(args.source_file, include_anchors=args.include_anchors)
+    if args.synthetic_sources > 0:
+        sources.extend(build_synthetic_utterances(args.synthetic_sources, seed=args.seed))
+        # Re-dedupe after synthetic extension
+        seen = set()
+        deduped: List[str] = []
+        for s in sources:
+            k = _normalize_text(s).lower()
+            if k and k not in seen:
+                seen.add(k)
+                deduped.append(s)
+        sources = deduped
     if not sources:
         raise ValueError("no source utterances available")
 
@@ -404,7 +628,12 @@ def main() -> None:
                 if not c:
                     c = generate_template_candidate(user_text, topic_aware=False)
 
-            v = validate_candidate(c, max_words=args.max_words, strict_filter=args.strict_filter)
+            v = validate_candidate(
+                c,
+                min_words=args.min_words,
+                max_words=args.max_words,
+                strict_filter=args.strict_filter,
+            )
             if v.accepted:
                 r = make_record(user_text, v.text)
                 tags = list(r.get("tags", []))
@@ -415,13 +644,22 @@ def main() -> None:
                 rejects.append({"user": user_text, "candidate": c, "reason": v.reason})
 
     candidates = _dedupe_records(candidates)
+    candidates = _cap_phrase_frequency(candidates, max_per_phrase=args.max_per_phrase)
     random.shuffle(candidates)
 
     # Top up with safe templates if pool is too small
-    while len(candidates) < total_target:
+    max_topup_attempts = max(total_target * 50, 1000)
+    attempts = 0
+    while len(candidates) < total_target and attempts < max_topup_attempts:
+        attempts += 1
         u = random.choice(sources)
         c = generate_template_candidate(u, topic_aware=False)
-        v = validate_candidate(c, max_words=args.max_words, strict_filter=args.strict_filter)
+        v = validate_candidate(
+            c,
+            min_words=args.min_words,
+            max_words=args.max_words,
+            strict_filter=args.strict_filter,
+        )
         if not v.accepted:
             continue
         r = make_record(u, v.text)
@@ -430,6 +668,13 @@ def main() -> None:
         r["tags"] = tags
         candidates.append(r)
         candidates = _dedupe_records(candidates)
+        candidates = _cap_phrase_frequency(candidates, max_per_phrase=args.max_per_phrase)
+
+    if len(candidates) < total_target:
+        raise RuntimeError(
+            f"unable to reach requested dataset size: have={len(candidates)}, need={total_target}. "
+            "Try reducing train/val size, adding more sources, or relaxing strict filters."
+        )
 
     train_rows = candidates[: args.train_size]
     val_rows = candidates[args.train_size : args.train_size + args.val_size]
