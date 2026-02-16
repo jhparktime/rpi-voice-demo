@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -36,8 +37,8 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         help="Always-listening mode: VAD detects speech automatically (no Enter needed).",
     )
     parser.add_argument(
-        "--max-turns", type=int, default=5,
-        help="Number of conversation turns to remember for multi-turn context (default 5, 0 to disable).",
+        "--max-turns", type=int, default=3,
+        help="Number of conversation turns to remember for multi-turn context (default 3, 0 to disable).",
     )
     parser.add_argument(
         "--sentence-streaming", action="store_true", default=False,
@@ -95,6 +96,50 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument("--onnx-max-new-tokens", type=int, default=24, help="ONNX LLM max new tokens.")
     parser.add_argument("--onnx-temperature", type=float, default=0.3, help="ONNX LLM temperature.")
 
+    parser.add_argument(
+        "--router-mode",
+        type=str,
+        choices=["legacy", "short_long"],
+        default=os.environ.get("ROUTER_MODE", "short_long"),
+        help="Routing strategy: legacy (LOCAL/CLOUD) or short_long (SHORT/LONG).",
+    )
+    parser.add_argument(
+        "--router-min-score",
+        type=float,
+        default=float(os.environ.get("ROUTER_MIN_SCORE", "0.17")),
+        help="Minimum score threshold for confident LONG routing.",
+    )
+    parser.add_argument(
+        "--router-margin",
+        type=float,
+        default=float(os.environ.get("ROUTER_MARGIN", "0.03")),
+        help="Uncertainty threshold on (best score - second best).",
+    )
+    parser.add_argument(
+        "--gemini-short-max-tokens",
+        type=int,
+        default=int(os.environ.get("GEMINI_SHORT_MAX_TOKENS", "140")),
+        help="Max output tokens for Gemini SHORT mode.",
+    )
+    parser.add_argument(
+        "--gemini-long-max-tokens",
+        type=int,
+        default=int(os.environ.get("GEMINI_LONG_MAX_TOKENS", "420")),
+        help="Max output tokens for Gemini LONG mode.",
+    )
+    parser.add_argument(
+        "--filler-provider",
+        type=str,
+        default=os.environ.get("FILLER_PROVIDER", "smollm2"),
+        help="Filler provider: smollm2 (default) or off.",
+    )
+    parser.add_argument(
+        "--filler-delay-ms",
+        type=int,
+        default=int(float(os.environ.get("FILLER_DELAY_SECONDS", "0.75")) * 1000),
+        help="Wait this long before playing LONG filler (ms).",
+    )
+
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
@@ -133,6 +178,13 @@ def print_config(args: argparse.Namespace, voice: str) -> None:
         "onnx_model",
         "onnx_max_new_tokens",
         "onnx_temperature",
+        "router_mode",
+        "router_min_score",
+        "router_margin",
+        "gemini_short_max_tokens",
+        "gemini_long_max_tokens",
+        "filler_provider",
+        "filler_delay_ms",
     ]:
         if hasattr(args, key):
             d[key] = _arg_to_json_value(getattr(args, key))

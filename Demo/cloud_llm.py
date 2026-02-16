@@ -1,4 +1,4 @@
-"""Thin wrapper for calling a configurable CLOUD LLM (OpenAI GPT, Gemini, or custom HTTP API)."""
+"""Thin wrapper for calling a configurable CLOUD LLM (Gemini-first by default)."""
 from __future__ import annotations
 
 import os
@@ -15,7 +15,7 @@ GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
 
-def _call_openai(prompt: str, system: str, timeout: float) -> str:
+def _call_openai(prompt: str, system: str, timeout: float, max_output_tokens: int = 512, temperature: float = 0.7) -> str:
     """Call OpenAI Chat Completions API (GPT-4o, gpt-4o-mini, etc.)."""
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
@@ -30,8 +30,8 @@ def _call_openai(prompt: str, system: str, timeout: float) -> str:
             {"role": "system", "content": (system or "").strip()},
             {"role": "user", "content": (prompt or "").strip()},
         ],
-        "max_tokens": 512,
-        "temperature": 0.7,
+        "max_tokens": max_output_tokens,
+        "temperature": temperature,
     }
 
     headers: Dict[str, str] = {
@@ -62,7 +62,13 @@ def _call_openai(prompt: str, system: str, timeout: float) -> str:
         return f"(OpenAI parse error: {exc})"
 
 
-def _call_gemini(prompt: str, system: str, timeout: float) -> str:
+def _call_gemini(
+    prompt: str,
+    system: str,
+    timeout: float,
+    max_output_tokens: int = 512,
+    temperature: float = 0.7,
+) -> str:
     """Call Google Gemini API (e.g. Gemini 2.5 Flash free tier)."""
     api_key = (os.environ.get("GEMINI_API_KEY") or os.environ.get("CLOUD_LLM_API_KEY") or "").strip()
     if not api_key:
@@ -76,8 +82,8 @@ def _call_gemini(prompt: str, system: str, timeout: float) -> str:
         "contents": [{"role": "user", "parts": [{"text": (prompt or "").strip()}]}],
         "systemInstruction": {"parts": [{"text": (system or "").strip()}]},
         "generationConfig": {
-            "maxOutputTokens": 512,
-            "temperature": 0.7,
+            "maxOutputTokens": max_output_tokens,
+            "temperature": temperature,
         },
     }
 
@@ -107,11 +113,18 @@ def _call_gemini(prompt: str, system: str, timeout: float) -> str:
         return f"(Gemini parse error: {exc})"
 
 
-def call_cloud_llm(prompt: str, system: str, timeout: float = 20.0) -> str:
+def call_cloud_llm(
+    prompt: str,
+    system: str,
+    timeout: float = 20.0,
+    max_output_tokens: int = 512,
+    temperature: float = 0.7,
+    preferred_provider: str | None = None,
+) -> str:
     """
     Call a CLOUD LLM.
 
-    Priority: OPENAI_API_KEY → GEMINI_API_KEY → CLOUD_LLM_URL.
+    Priority: MAIN_LLM_PROVIDER (default: Gemini) → OPENAI_API_KEY → GEMINI_API_KEY → CLOUD_LLM_URL.
 
     Env (OpenAI):
         OPENAI_API_KEY: OpenAI API key
@@ -128,14 +141,34 @@ def call_cloud_llm(prompt: str, system: str, timeout: float = 20.0) -> str:
     openai_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     gemini_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
     url = (os.environ.get("CLOUD_LLM_URL") or "").strip()
+    provider = (preferred_provider or os.environ.get("MAIN_LLM_PROVIDER") or "gemini").strip().lower()
 
-    if openai_key:
-        return _call_openai(prompt, system, timeout)
+    if provider == "openai":
+        if openai_key:
+            return _call_openai(prompt, system, timeout, max_output_tokens=max_output_tokens, temperature=temperature)
+        return "(OpenAI not configured: set OPENAI_API_KEY)"
+    if provider == "gemini":
+        if gemini_key:
+            return _call_gemini(prompt, system, timeout, max_output_tokens=max_output_tokens, temperature=temperature)
+        return "(Gemini not configured: set GEMINI_API_KEY)"
+    if provider == "custom":
+        if url:
+            return _call_custom_http(prompt, system, timeout)
+        return "(Cloud custom endpoint not configured: set CLOUD_LLM_URL)"
+
     if gemini_key:
-        return _call_gemini(prompt, system, timeout)
+        return _call_gemini(
+            prompt,
+            system,
+            timeout,
+            max_output_tokens=max_output_tokens,
+            temperature=temperature,
+        )
+    if openai_key:
+        return _call_openai(prompt, system, timeout, max_output_tokens=max_output_tokens, temperature=temperature)
     if url:
         return _call_custom_http(prompt, system, timeout)
-    return "(Cloud LLM not configured: set OPENAI_API_KEY, GEMINI_API_KEY, or CLOUD_LLM_URL)"
+    return "(Cloud LLM not configured: set MAIN_LLM_PROVIDER, OPENAI_API_KEY, GEMINI_API_KEY, or CLOUD_LLM_URL)"
 
 
 def _call_custom_http(prompt: str, system: str, timeout: float) -> str:
@@ -171,4 +204,3 @@ def _call_custom_http(prompt: str, system: str, timeout: float) -> str:
         if isinstance(val, str) and val.strip():
             return val.strip()
     return "(Cloud LLM: empty response)"
-

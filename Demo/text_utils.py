@@ -1,8 +1,9 @@
 """Text postprocessing, LLM prompt constants, and conversation history."""
 from __future__ import annotations
 
+import os
 import re
-from typing import List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def _limit_words(s: str, max_words: int) -> Tuple[str, bool]:
@@ -107,6 +108,70 @@ def split_into_chunks(text: str, max_words_per_chunk: int | None = None) -> List
     return [c for c in final_chunks if c]
 
 
+_FILLER_FORBIDDEN_PATTERNS = [
+    re.compile(r"\bhere(?:'s| is)\b", re.IGNORECASE),
+    re.compile(r"\bthe answer\b", re.IGNORECASE),
+    re.compile(r"\bsql query\b", re.IGNORECASE),
+    re.compile(r"\bi(?: am|'m)?\s*sorry\b", re.IGNORECASE),
+    re.compile(r"\bjust kidding\b", re.IGNORECASE),
+    re.compile(r"\bbecause\b", re.IGNORECASE),
+]
+
+_FILLER_NAME_ENTITY_HINT_PATTERNS = [
+    re.compile(r"\b([A-Z][a-z]+ [A-Z][a-z]+)\b"),
+    re.compile(r"\b(?:Mr\.|Mrs\.|Ms\.|Dr\.|Prof\.)\s+[A-Z][a-z]+\b"),
+]
+
+_FILLER_FALLBACKS = [
+    "One moment.",
+    "Just a sec.",
+    "Checking that now.",
+    "Working on it.",
+    "Let me check.",
+]
+
+
+def validate_cloud_filler_output(text: str, min_words: int = 3, max_words: int = 12) -> Optional[str]:
+    """Validate generated filler with soft constraints; return normalized text or None."""
+    s = (text or "").strip()
+    if not s:
+        return None
+    s = " ".join([ln.strip() for ln in s.splitlines() if ln.strip()]).strip().strip("\"'")
+    if not s:
+        return None
+    if "?" in s or re.search(r"\d", s):
+        return None
+    if any(p.search(s) for p in _FILLER_NAME_ENTITY_HINT_PATTERNS):
+        return None
+    if len(re.findall(r"[.!?]+", s)) > 1:
+        return None
+    if any(p.search(s) for p in _FILLER_FORBIDDEN_PATTERNS):
+        return None
+    words = s.split()
+    if len(words) < min_words or len(words) > max_words:
+        return None
+    if s[-1] not in ".!?":
+        s = s.rstrip(",:;") + "."
+    return s
+
+
+def should_emit_long_filler(route_mode: str, elapsed_s: float, delay_ms: int) -> bool:
+    """Gate helper used by the speech-delay filler rule."""
+    try:
+        if (route_mode or "").strip().upper() != "LONG":
+            return False
+        delay_seconds = float(delay_ms) / 1000.0
+        return delay_seconds > 0.0 and float(elapsed_s) >= delay_seconds
+    except (TypeError, ValueError):
+        return False
+
+
+def fallback_cloud_filler(user_text: str = "") -> str:
+    """Return a short natural fallback filler; deterministic by user text hash."""
+    idx = abs(hash(user_text or "")) % len(_FILLER_FALLBACKS)
+    return _FILLER_FALLBACKS[idx]
+
+
 OLLAMA_DEFAULT_SYSTEM = (
     "You are a warm, supportive friend. Reply in English in 1-2 short sentences. "
     "No emojis, no lists. Sound natural and spoken."
@@ -174,7 +239,7 @@ def build_cloud_filler_system_prompt(emotion_label: str | None) -> str:
         "You may briefly acknowledge the TOPIC of the user's question, but you must NOT answer it.\n"
         "Keep the phrase neutral and supportive.\n"
         "\n"
-        "Generate a SHORT bridge phrase (ideally 3-8 words) while I process the request.\n"
+        "Generate a SHORT bridge phrase (ideally 6-10 words) while I process the request.\n"
         "Examples (feel free to vary naturally):\n"
         "- 'Let me think about that AI question with you.'\n"
         "- 'Give me a second to organize that CPU idea.'\n"
@@ -182,7 +247,7 @@ def build_cloud_filler_system_prompt(emotion_label: str | None) -> str:
         "- 'Let me gather the most important details for you.'\n"
         "\n"
         "CRITICAL RULES:\n"
-        "- Keep it under 10 words\n"
+        "- Keep it between 6 and 12 words\n"
         "- You may mention the topic, but DO NOT answer the question\n"
         "- DO NOT apologize or explain limitations\n"
         "- DO NOT use random poetic imagery (flowers, wind, weather, etc.) unrelated to the topic\n"
@@ -195,42 +260,142 @@ def build_cloud_filler_system_prompt(emotion_label: str | None) -> str:
 # ── Conversation history buffer ───────────────────────────────────────────
 
 
+def _extract_pinned_facts(statement: str) -> Dict[str, str]:
+    text = (statement or "").strip()
+    if not text:
+        return {}
+    facts: Dict[str, str] = {}
+    patterns: Dict[str, re.Pattern[str]] = {
+        "name": re.compile(r"\b(?:my name is|i am|i'm)\s+([A-Za-z][A-Za-z0-9_\\- ]{1,64})", re.IGNORECASE),
+        "location": re.compile(r"\b(?:i live in|i am in|i'm in)\s+([A-Za-z][A-Za-z0-9_\\- ]{1,64})", re.IGNORECASE),
+        "preference": re.compile(r"\b(?:i prefer|i like|i need)\s+([A-Za-z][A-Za-z0-9_\\- ]{1,64})", re.IGNORECASE),
+    }
+    for key, pattern in patterns.items():
+        match = pattern.search(text)
+        if match:
+            value = (match.group(1) or "").strip().strip(",.")
+            if value:
+                facts[key] = value
+    return facts
+
+
+def _summarize_turns_fallback(turns: List[Tuple[str, str]], max_words: int) -> str:
+    if not turns:
+        return ""
+    compact: List[str] = []
+    for user, assistant in turns:
+        user = (user or "").strip()
+        assistant = (assistant or "").strip()
+        if not user or not assistant:
+            continue
+        compact.append(f"User asked: {user[:72].strip()} | Assistant said: {assistant[:72].strip()}")
+    if not compact:
+        return ""
+    return postprocess_output(" ".join(compact), max_sentences=4, max_words=max_words)
+
+
+def _summarize_turns_bert(turns: List[Tuple[str, str]], max_words: int) -> str:
+    model_name = os.environ.get("MEMORY_BERT_SUMMARIZER")
+    if not model_name:
+        return _summarize_turns_fallback(turns, max_words=max_words)
+    try:
+        from transformers import pipeline  # type: ignore
+
+        summarizer = pipeline("summarization", model=model_name)
+        text = " ".join([f"{u} {a}" for u, a in turns]).strip()
+        if not text:
+            return ""
+        result = summarizer(text, max_length=max(20, max_words), min_length=max(12, max_words // 3), do_sample=False)
+        if isinstance(result, list) and result:
+            return postprocess_output(
+                result[0].get("summary_text", ""),
+                max_sentences=4,
+                max_words=max_words,
+            )
+    except Exception:
+        pass
+    return _summarize_turns_fallback(turns, max_words=max_words)
+
+
+def update_memory(
+    history: List[Tuple[str, str]],
+    n_recent_turns: int = 3,
+    max_summary_turns: int = 12,
+    summary_word_budget: int = 120,
+) -> Dict[str, Any]:
+    """Build a deterministic memory state snapshot from a raw history list."""
+    buffer = ConversationBuffer(
+        max_turns=max(1, n_recent_turns),
+        max_summary_turns=max_summary_turns,
+        summary_word_budget=max(summary_word_budget, 20),
+    )
+    for user_text, assistant_text in history:
+        buffer.add_turn(user_text, assistant_text)
+    return buffer.as_dict()
+
+
 class ConversationBuffer:
-    """Ring buffer that stores the last N conversation turns for multi-turn context.
+    """Maintain rolling summary + recent turns + pinned facts for LLM context."""
 
-    Each turn is a (user_text, assistant_reply) pair.
-    When building the LLM prompt, the history is prepended so the model can
-    maintain conversational coherence across turns.
-    """
-
-    def __init__(self, max_turns: int = 5) -> None:
-        self.max_turns = max_turns
+    def __init__(
+        self,
+        max_turns: int = 3,
+        max_summary_turns: int = 12,
+        summary_word_budget: int = 120,
+    ) -> None:
+        self.max_turns = max(1, max_turns)
+        self.max_summary_turns = max(0, max_summary_turns)
+        self.summary_word_budget = max(20, summary_word_budget)
         self.turns: List[Tuple[str, str]] = []
+        self._archived_turns: List[Tuple[str, str]] = []
+        self.rolling_summary = ""
+        self.pinned_facts: Dict[str, str] = {}
 
     def add_turn(self, user_text: str, assistant_reply: str) -> None:
-        """Record a completed conversation turn."""
-        self.turns.append((user_text, assistant_reply))
-        if len(self.turns) > self.max_turns:
-            self.turns = self.turns[-self.max_turns:]
+        """Record a completed conversation turn and update rolling memory."""
+        user = (user_text or "").strip()
+        assistant = (assistant_reply or "").strip()
+        if not user or not assistant:
+            return
+
+        if len(self.turns) >= self.max_turns:
+            self._archived_turns.append(self.turns.pop(0))
+            if len(self._archived_turns) > self.max_summary_turns > 0:
+                self._archived_turns = self._archived_turns[-self.max_summary_turns :]
+
+        self.turns.append((user, assistant))
+        self.pinned_facts.update(_extract_pinned_facts(user))
+        self.rolling_summary = _summarize_turns_bert(self._archived_turns, max_words=self.summary_word_budget)
 
     def format_prompt_with_context(self, current_user_text: str) -> str:
-        """Build a prompt string that includes prior conversation context.
-
-        If there is no history, returns the current text as-is.
-        """
-        if not self.turns:
-            return current_user_text
-
+        """Build context prompt with summary + pinned facts + recent raw turns."""
+        user_text = (current_user_text or "").strip()
         parts: List[str] = []
-        for user, assistant in self.turns:
-            parts.append(f"User: {user}")
-            parts.append(f"Assistant: {assistant}")
-        parts.append(f"User: {current_user_text}")
-        return "\n".join(parts)
+        if self.rolling_summary:
+            parts.append(f"RollingSummary: {self.rolling_summary}")
+        if self.pinned_facts:
+            facts = ", ".join(f"{k}={v}" for k, v in self.pinned_facts.items())
+            parts.append(f"PinnedFacts: {facts}")
+        if self.turns:
+            parts.append("RecentTurns:")
+            for user, assistant in self.turns:
+                parts.append(f"User: {user}")
+                parts.append(f"Assistant: {assistant}")
+        parts.append(f"User: {user_text}")
+        return "\n".join(parts) if parts else user_text
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "rolling_summary": self.rolling_summary,
+            "pinned_facts": dict(self.pinned_facts),
+            "recent_raw_turns": list(self.turns),
+        }
 
     def clear(self) -> None:
         self.turns.clear()
+        self._archived_turns.clear()
+        self.pinned_facts.clear()
+        self.rolling_summary = ""
 
     def __len__(self) -> int:
         return len(self.turns)
-

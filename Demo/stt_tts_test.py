@@ -1,17 +1,4 @@
-"""
-Sherpa-onnx STT -> Emotion + Intent routing -> LOCAL/CLOUD LLM -> sherpa-onnx VITS TTS demo (RPi).
-
-STT modes (controlled by CLI flags):
-  --streaming       (default) Stream mic to OnlineRecognizer with endpoint detection; Enter to start.
-  --no-streaming    Fixed-duration recording + chunked transcription (Phase 1 fallback).
-  --vad             Always-listening: VAD detects speech automatically, no Enter needed.
-
-LOCAL: Ollama (e.g., smollm2:360m) with empathic prompt.
-CLOUD: external HTTP LLM (if configured) with informational prompt.
-
-The sLLM provides semantic fillers during CLOUD LLM latency so the conversation
-feels natural even when the main answer takes a few seconds.
-"""
+"""Sherpa-onnx STT -> router -> Gemini LLM -> sherpa-onnx VITS TTS demo (RPi)."""
 from __future__ import annotations
 
 import gc
@@ -38,6 +25,7 @@ from . import tts_sherpa
 from .emotion import EmotionClassifierONNX, EmotionResult
 from .intent_router import classify_intent_easy_or_complex
 from . import router_anchors_runtime
+from . import short_long_router
 
 
 ENABLE_EMOTION = os.environ.get("ENABLE_EMOTION", "1").strip() not in {"0", "false", "False", "no", "NO"}
@@ -46,6 +34,46 @@ ENABLE_CLOUD_FILLER = os.environ.get("ENABLE_CLOUD_FILLER", "0").strip() not in 
 FORCE_MODE = (os.environ.get("FORCE_MODE", "") or "").strip().upper()
 
 SLOW_ASR_WARN_THRESHOLD = 10.0
+_GEMINI_TEMPLATE_SHORT = "gemini_short.txt"
+_GEMINI_TEMPLATE_LONG = "gemini_long.txt"
+_GEMINI_PROMPT_CACHE: dict[str, str] = {}
+
+
+def _load_prompt_template(filename: str, fallback: str) -> str:
+    cache_key = filename
+    if cache_key in _GEMINI_PROMPT_CACHE:
+        return _GEMINI_PROMPT_CACHE[cache_key]
+    prompt_path = Path(__file__).resolve().parent / "prompts" / filename
+    if prompt_path.exists():
+        try:
+            text = prompt_path.read_text(encoding="utf-8")
+        except Exception:
+            text = fallback
+        if not text.strip():
+            text = fallback
+    else:
+        text = fallback
+    _GEMINI_PROMPT_CACHE[cache_key] = text
+    return text
+
+
+def _build_gemini_prompt(mode: str, context: str) -> str:
+    template = _load_prompt_template(
+        _GEMINI_TEMPLATE_SHORT if mode == "SHORT" else _GEMINI_TEMPLATE_LONG,
+        fallback=(
+            "You are a concise voice assistant.\n"
+            "Context:\n{{CONTEXT}}\n\n"
+            "Reply using the current user request from the context."
+            if mode == "SHORT"
+            else
+            "You are a clear and concise voice assistant.\n"
+            "Context:\n{{CONTEXT}}\n\n"
+            "Start with a 1-2 sentence short answer, then add concise details."
+        ),
+    )
+    if "{{CONTEXT}}" in template:
+        return template.replace("{{CONTEXT}}", (context or "").strip())
+    return f"{template}\n\nContext:\n{(context or '').strip()}\n"
 
 
 # ── TTS helper ─────────────────────────────────────────────────────────────
@@ -121,10 +149,15 @@ def _play_chunks_pipelined(
         if sample_rate is None:
             sample_rate = chunk_sr
         
-        # First chunk: wait for filler to finish
+        # First chunk: wait for filler to finish, then log TTFS
         if first_chunk and filler_player and filler_player.is_playing():
             print("[Cloud] Waiting for filler to finish...", flush=True)
             filler_player.wait()
+        if first_chunk:
+            print(
+                f"  [LATENCY] TTFS: {time.perf_counter() - t0:.2f}s",
+                flush=True,
+            )
             first_chunk = False
         
         # Trim start only on first chunk
@@ -322,55 +355,292 @@ def _generate_filler_ollama(
     user_text: str,
     timeout: float = 3.0,
 ) -> str:
-    """Generate short Ollama filler phrase for Cloud waiting period.
-    
-    Returns empty string if Ollama unavailable, filler disabled, or generation fails.
-    """
-    # Check if filler is enabled (CLI flag or env var)
-    filler_enabled = getattr(args, 'cloud_filler', ENABLE_CLOUD_FILLER)
+    """Generate short smolLM2 filler phrase for Gemini delay gate."""
+    filler_enabled = getattr(args, "cloud_filler", ENABLE_CLOUD_FILLER)
     if not filler_enabled:
         print("[Filler] Skipped (disabled by --no-cloud-filler)", flush=True)
+        return ""
+
+    filler_provider = (getattr(args, "filler_provider", "off") or "off").strip().lower()
+    if filler_provider != "smollm2":
+        print(f"[Filler] Skipped (provider={filler_provider})", flush=True)
         return ""
     
     if not args.ollama:
         print("[Filler] Skipped (Ollama not enabled; use --ollama flag)", flush=True)
         return ""
     
-    print("[Filler] Generating Ollama filler...", flush=True)
+    print("[Filler] Generating smolLM2 filler...", flush=True)
     system = text_utils.build_cloud_filler_system_prompt(emotion_label)
     try:
         filler_prompt = (
             "User just said: "
             f"{user_text!r}\n"
-            "Generate ONE very short spoken bridge phrase (3-8 words) that briefly acknowledges this topic "
-            "while you think. Do NOT answer the question or give details."
+            "Generate ONE short spoken bridge phrase (3-12 words) while you think. "
+            "Do NOT answer the question or give details."
         )
         filler = llm_ollama.generate_ollama(
             prompt=filler_prompt,
             model=args.ollama_model,
             system=system,
             url=args.ollama_url,
-            num_predict=15,  # Short response
-            temperature=0.7,
+            num_predict=20,  # Slightly longer budget for 6-10 word fillers
+            temperature=0.5,
             stop=["\n"],
             keep_alive=args.ollama_keep_alive,
             num_thread=args.ollama_num_thread,
             num_ctx=128,  # Minimal context
             num_batch=args.ollama_num_batch,
             max_sentences=1,
-            max_words=10,
+            max_words=12,
             timeout=timeout,
         )
-        result = filler.strip() if filler and not filler.startswith("(") else ""
+        raw = filler.strip() if filler and not filler.startswith("(") else ""
+        result = text_utils.validate_cloud_filler_output(raw)
         if not result:
-            print(f"[Filler] Generation returned empty/error: {filler[:100] if filler else 'empty'}", flush=True)
+            if raw:
+                print(f"[Filler] Guardrail fallback (raw={raw[:100]!r})", flush=True)
+            else:
+                print(f"[Filler] Generation returned empty/error: {filler[:100] if filler else 'empty'}", flush=True)
+            return text_utils.fallback_cloud_filler(user_text)
         return result
     except Exception as exc:  # noqa: BLE001
         print(f"[Filler] Generation failed: {exc}", flush=True, file=sys.stderr)
-        return ""
+        return text_utils.fallback_cloud_filler(user_text)
 
 
-# ── Brain: Emotion + Intent routing → LOCAL / CLOUD LLM → TTS ─────────────
+# ── Routing + Gemini orchestration helpers ─────────────────────────────────
+
+def _build_gemini_routes(
+    args: Any,
+    text: str,
+    emotion_classifier: Optional[EmotionClassifierONNX],
+) -> Tuple[str, Optional[EmotionResult], Optional[short_long_router.RouteDecision]]:
+    route_mode = "SHORT" if args.router_mode == "short_long" else "LOCAL"
+    route_decision: Optional[short_long_router.RouteDecision] = None
+    emotion_result: Optional[EmotionResult] = None
+
+    def _run_emotion() -> Optional[EmotionResult]:
+        if not (ENABLE_EMOTION and emotion_classifier and emotion_classifier.available):
+            return None
+        try:
+            return emotion_classifier.predict(text)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Emotion] error: {exc}", file=sys.stderr)
+            return None
+
+    def _run_legacy_router() -> str:
+        if not ENABLE_INTENT_ROUTER:
+            return "LOCAL"
+        try:
+            rr = router_anchors_runtime.route_local_or_cloud(text)
+            print(
+                f"[Route] mode={rr.mode} conf={rr.confidence:.2f} "
+                f"(local={rr.best_local:.2f}, cloud={rr.best_cloud:.2f}, Δ={rr.delta:.2f}) | "
+                f"anchor={rr.matched_anchor!r}",
+                flush=True,
+            )
+            return rr.mode
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Intent] anchors-router error: {exc}", file=sys.stderr)
+            try:
+                return classify_intent_easy_or_complex(text)
+            except Exception as exc2:  # noqa: BLE001
+                print(f"[Intent] simple classifier error: {exc2}", file=sys.stderr)
+                return "LOCAL"
+
+    # legacy force mode: LOCAL/CLOUD
+    if FORCE_MODE in {"LOCAL", "CLOUD", "SHORT", "LONG"}:
+        force_mode = FORCE_MODE
+        if force_mode == "LOCAL":
+            route_mode = "SHORT" if args.router_mode == "short_long" else "LOCAL"
+        elif force_mode == "CLOUD":
+            route_mode = "LONG" if args.router_mode == "short_long" else "CLOUD"
+        elif force_mode in {"SHORT", "LONG"}:
+            route_mode = force_mode
+        if route_mode in {"LONG", "SHORT"}:
+            print(f"[Route] forced mode={route_mode} (FORCE_MODE)", flush=True)
+        else:
+            print(f"[Route] forced mode={route_mode} (FORCE_MODE)", flush=True)
+
+        emotion_result = _run_emotion()
+        return route_mode, emotion_result, route_decision
+
+    # short-long router
+    if args.router_mode == "short_long":
+        try:
+            route_decision = short_long_router.route_query(
+                text,
+                min_score=args.router_min_score,
+                margin=args.router_margin,
+            )
+            route_mode = route_decision.mode
+            print(
+                f"[Route] mode={route_decision.mode} conf={route_decision.confidence:.2f} "
+                f"reason={route_decision.reason}",
+                flush=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Route] short_long router error: {exc}", file=sys.stderr)
+            route_mode = "SHORT"
+        return route_mode, _run_emotion(), route_decision
+
+    # legacy router
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        fut_emotion = ex.submit(_run_emotion)
+        fut_intent = ex.submit(_run_legacy_router)
+        emotion_result = fut_emotion.result()
+        route_mode = fut_intent.result()
+
+    return route_mode, emotion_result, route_decision
+
+
+def _play_filler_tts(tts: Any, voice: str, filler_text: str, args: Any) -> Optional[audio_io.AudioPlayer]:
+    t_tts_start = time.perf_counter()
+    try:
+        filler_audio, filler_sr = _synthesize_tts(tts, voice, filler_text)
+        t_tts_end = time.perf_counter()
+        print(
+            f"[LATENCY] Filler TTS: {t_tts_end - t_tts_start:.2f}s",
+            flush=True,
+        )
+        player = audio_io.AudioPlayer(
+            filler_audio,
+            filler_sr,
+            device=args.output_device,
+            volume=args.volume,
+        )
+        player.start()
+        print("[FILLER] Playing...", flush=True)
+        return player
+    except Exception as exc:  # noqa: BLE001
+        print(f"[FILLER] TTS/playback failed: {exc}", file=sys.stderr, flush=True)
+        return None
+
+
+def _run_gemini_turn(
+    t0: float,
+    args: Any,
+    route_mode: str,
+    prompt_context: str,
+    user_text: str,
+    tts: Any,
+    voice: str,
+    emotion_label: Optional[str],
+    return_audio: bool = False,
+    allow_filler: bool = True,
+) -> Tuple[Optional[str], Optional[np.ndarray], Optional[int]]:
+    """Run Gemini (SHORT/LONG), with optional long-mode filler delay gate."""
+    gemini_prompt = _build_gemini_prompt(route_mode, prompt_context)
+    gemini_tokens = (
+        args.gemini_short_max_tokens if route_mode == "SHORT" else args.gemini_long_max_tokens
+    )
+
+    def _call_gemini() -> str:
+        return cloud_llm.call_cloud_llm(
+            prompt=gemini_prompt,
+            system=text_utils.build_cloud_system_prompt(emotion_label),
+            timeout=20.0,
+            max_output_tokens=gemini_tokens,
+            temperature=0.35,
+            preferred_provider="gemini",
+        )
+
+    t_parallel_start = time.perf_counter()
+    filler_triggered = False
+    filler_player: Optional[audio_io.AudioPlayer] = None
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        fut_gemini = executor.submit(_call_gemini)
+
+        delay_ms = int(getattr(args, "filler_delay_ms", 750))
+        delay_s = max(0.0, float(delay_ms) / 1000.0)
+
+        if route_mode == "LONG" and allow_filler and delay_s > 0.0:
+            try:
+                cloud_reply = fut_gemini.result(timeout=delay_s)
+                t_cloud_ready = time.perf_counter()
+            except concurrent.futures.TimeoutError:
+                filler_triggered = True
+                t_gate = time.perf_counter()
+                print(
+                    f"[Filler] Delay gate reached: elapsed={t_gate - t_parallel_start:.2f}s "
+                    f"delay_ms={delay_ms}",
+                    flush=True,
+                )
+                filler_text = _generate_filler_ollama(args, emotion_label, prompt_context, timeout=3.0)
+                if filler_text:
+                    print(f"[FILLER] {filler_text}", flush=True)
+                    fut_filler_tts = executor.submit(_play_filler_tts, tts, voice, filler_text, args)
+                    # Wait for full Gemini answer while filler is being spoken.
+                    cloud_reply = fut_gemini.result()
+                    t_cloud_ready = time.perf_counter()
+                    try:
+                        filler_player = fut_filler_tts.result()
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[FILLER] TTS future failed: {exc}", file=sys.stderr, flush=True)
+                        filler_player = None
+                else:
+                    cloud_reply = fut_gemini.result()
+                    t_cloud_ready = time.perf_counter()
+        else:
+            cloud_reply = fut_gemini.result()
+            t_cloud_ready = time.perf_counter()
+
+    print(f"[Route] filler_triggered={filler_triggered} for {route_mode} mode")
+    print(f"[LATENCY] Gemini call: {t_cloud_ready - t_parallel_start:.2f}s")
+
+    if cloud_reply and not cloud_reply.startswith("("):
+        if route_mode == "SHORT":
+            assistant_reply = text_utils.postprocess_output(
+                cloud_reply,
+                max_sentences=2,
+                max_words=60,
+            )
+        else:
+            assistant_reply = text_utils.postprocess_output(
+                cloud_reply,
+                max_sentences=20,
+                max_words=220,
+            )
+    else:
+        assistant_reply = user_text
+
+    if not assistant_reply:
+        assistant_reply = user_text
+
+    if cloud_reply:
+        print(f"[LLM-GEMINI-{route_mode}] {cloud_reply}", flush=True)
+
+    if return_audio:
+        t2b = time.perf_counter()
+        try:
+            tts_audio, tts_sr = _synthesize_tts(tts, voice, assistant_reply)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[error] TTS failed: {exc}", file=sys.stderr)
+            return assistant_reply, None, None
+        t3 = time.perf_counter()
+        print(f"[time] synthesize: {t3 - t2b:.2f}s", flush=True)
+        if args.trim_start > 0.0:
+            tts_audio = audio_io.trim_start_seconds(tts_audio, tts_sr, args.trim_start)
+        return assistant_reply, tts_audio, tts_sr
+
+    max_words_per_chunk = getattr(args, "cloud_tts_max_words_per_chunk", 20)
+    chunks = text_utils.split_into_chunks(assistant_reply, max_words_per_chunk=max_words_per_chunk)
+    if not chunks:
+        chunks = [assistant_reply]
+
+    print(f"[GEMINI] Streaming {len(chunks)} chunk(s)...", flush=True)
+    t_tts_start = time.perf_counter()
+    _, _ = _play_chunks_pipelined(chunks, tts, voice, args, filler_player=filler_player)
+    t_tts_end = time.perf_counter()
+    print(f"[LATENCY] Total TTS+Play: {t_tts_end - t_tts_start:.2f}s")
+    print(f"[LATENCY] End-to-end: {t_tts_end - t0:.2f}s")
+    print("=" * 60 + "\n", flush=True)
+    return assistant_reply, None, None
+
+
+# ── Brain: Emotion + Intent routing → Gemini / legacy LOCAL/CLOUD → TTS ────
 
 def _run_turn_brain(
     t0: float,
@@ -381,65 +651,30 @@ def _run_turn_brain(
     emotion_classifier: Optional[EmotionClassifierONNX],
     conversation: Optional[text_utils.ConversationBuffer] = None,
 ) -> Optional[str]:
-    """Route using emotion + intent, call LOCAL or CLOUD LLM, then TTS.
-
-    For CLOUD requests the sLLM first generates a quick semantic filler
-    ("Let me look that up…") so the user hears something immediately while
-    the heavier CLOUD model is processing.
-
-    Returns the assistant reply text (or None if no LLM reply was generated).
-    """
-    route_mode = "LOCAL"
-    emotion_result: Optional[EmotionResult] = None
-
-    # Build context-enriched prompt for LLM (multi-turn history)
+    """Route using router, call Gemini or legacy path, then TTS."""
     llm_prompt = text
     if conversation is not None and len(conversation) > 0:
         llm_prompt = conversation.format_prompt_with_context(text)
 
-    if FORCE_MODE in {"LOCAL", "CLOUD"}:
-        route_mode = FORCE_MODE
-        if ENABLE_EMOTION and emotion_classifier and emotion_classifier.available:
-            try:
-                emotion_result = emotion_classifier.predict(text)
-            except Exception as exc:  # noqa: BLE001
-                print(f"[Emotion] error: {exc}", file=sys.stderr)
-                emotion_result = None
-    else:
-        def _run_emotion() -> Optional[EmotionResult]:
-            if not (ENABLE_EMOTION and emotion_classifier and emotion_classifier.available):
-                return None
-            try:
-                return emotion_classifier.predict(text)
-            except Exception as exc:  # noqa: BLE001
-                print(f"[Emotion] error: {exc}", file=sys.stderr)
-                return None
-
-        def _run_intent() -> str:
-            if not ENABLE_INTENT_ROUTER:
-                return "LOCAL"
-            try:
-                rr = router_anchors_runtime.route_local_or_cloud(text)
-                print(
-                    f"[Route] mode={rr.mode} conf={rr.confidence:.2f} "
-                    f"(local={rr.best_local:.2f}, cloud={rr.best_cloud:.2f}, Δ={rr.delta:.2f}) | "
-                    f"anchor={rr.matched_anchor!r}",
-                    flush=True,
-                )
-                return rr.mode
-            except Exception as exc:  # noqa: BLE001
-                print(f"[Intent] anchors-router error: {exc}", file=sys.stderr)
-                try:
-                    return classify_intent_easy_or_complex(text)
-                except Exception as exc2:  # noqa: BLE001
-                    print(f"[Intent] simple classifier error: {exc2}", file=sys.stderr)
-                    return "LOCAL"
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fut_emotion = ex.submit(_run_emotion)
-            fut_intent = ex.submit(_run_intent)
-            emotion_result = fut_emotion.result()
-            route_mode = fut_intent.result()
+    route_mode, emotion_result, _ = _build_gemini_routes(args, text, emotion_classifier)
+    if args.router_mode == "short_long":
+        route_mode = route_mode if route_mode in {"SHORT", "LONG"} else "SHORT"
+        print("\n" + "=" * 60, flush=True)
+        print(f"[GEMINI ROUTE] mode={route_mode}")
+        print("=" * 60 + "\n", flush=True)
+        assistant_reply, _, _ = _run_gemini_turn(
+            t0=t0,
+            args=args,
+            route_mode=route_mode,
+            prompt_context=llm_prompt,
+            user_text=text,
+            tts=tts,
+            voice=voice,
+            emotion_label=emotion_result.label if emotion_result else None,
+            return_audio=False,
+            allow_filler=True,
+        )
+        return assistant_reply
 
     emotion_label = emotion_result.label if emotion_result is not None else None
     assistant_reply: Optional[str] = None
@@ -628,58 +863,29 @@ def _run_turn_brain_sentence(
     emotion_classifier: Optional[EmotionClassifierONNX],
     conversation: Optional[text_utils.ConversationBuffer] = None,
 ) -> Tuple[Optional[str], Optional[np.ndarray], Optional[int]]:
-    """Sentence-streaming version: returns (reply_text, tts_audio, tts_sr) without playing.
-    
-    Simplified brain path for sentence-by-sentence processing:
-    - No streaming modes (those don't fit sentence boundaries)
-    - Returns audio for caller to play interruptibly
-    """
-    route_mode = "LOCAL"
-    emotion_result: Optional[EmotionResult] = None
-
-    # Build context-enriched prompt for LLM
+    """Sentence-streaming version: returns (reply_text, tts_audio, tts_sr) without playing."""
     llm_prompt = text
     if conversation is not None and len(conversation) > 0:
         llm_prompt = conversation.format_prompt_with_context(text)
 
-    if FORCE_MODE in {"LOCAL", "CLOUD"}:
-        route_mode = FORCE_MODE
-        if ENABLE_EMOTION and emotion_classifier and emotion_classifier.available:
-            try:
-                emotion_result = emotion_classifier.predict(text)
-            except Exception as exc:  # noqa: BLE001
-                print(f"[Emotion] error: {exc}", file=sys.stderr)
-    else:
-        def _run_emotion() -> Optional[EmotionResult]:
-            if not (ENABLE_EMOTION and emotion_classifier and emotion_classifier.available):
-                return None
-            try:
-                return emotion_classifier.predict(text)
-            except Exception as exc:  # noqa: BLE001
-                print(f"[Emotion] error: {exc}", file=sys.stderr)
-                return None
-
-        def _run_intent() -> str:
-            if not ENABLE_INTENT_ROUTER:
-                return "LOCAL"
-            try:
-                rr = router_anchors_runtime.route_local_or_cloud(text)
-                print(
-                    f"[Route] mode={rr.mode} conf={rr.confidence:.2f} "
-                    f"(local={rr.best_local:.2f}, cloud={rr.best_cloud:.2f}, Δ={rr.delta:.2f}) | "
-                    f"anchor={rr.matched_anchor!r}",
-                    flush=True,
-                )
-                return rr.mode
-            except Exception as exc:  # noqa: BLE001
-                print(f"[Route] error: {exc}", file=sys.stderr)
-                return "LOCAL"
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            fut_emotion = pool.submit(_run_emotion)
-            fut_intent = pool.submit(_run_intent)
-            emotion_result = fut_emotion.result()
-            route_mode = fut_intent.result()
+    route_mode, emotion_result, _ = _build_gemini_routes(args, text, emotion_classifier)
+    if args.router_mode == "short_long":
+        route_mode = route_mode if route_mode in {"SHORT", "LONG"} else "SHORT"
+        assistant_reply, tts_audio, tts_sr = _run_gemini_turn(
+            t0=t0,
+            args=args,
+            route_mode=route_mode,
+            prompt_context=llm_prompt,
+            user_text=text,
+            tts=tts,
+            voice=voice,
+            emotion_label=emotion_result.label if emotion_result else None,
+            return_audio=True,
+            allow_filler=False,
+        )
+        if tts_audio is not None and tts_sr is not None and args.trim_start > 0.0:
+            tts_audio = audio_io.trim_start_seconds(tts_audio, tts_sr, args.trim_start)
+        return assistant_reply, tts_audio, tts_sr
 
     emotion_label = emotion_result.label if emotion_result else "neutral"
 
