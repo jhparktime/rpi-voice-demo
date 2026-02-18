@@ -438,7 +438,13 @@ class ConversationBuffer:
         if self.max_summary_turns <= 0:
             return
         user, assistant = archived_turn
-        fragment = _summarize_turns_fallback([(user, assistant)], max_words=self._summary_fragment_budget)
+        # Prefer MiniLM-based extractive summarization per archived turn.
+        # _extractive_turn_summary internally falls back to deterministic text
+        # compaction when the embedding model is unavailable.
+        fragment = _extractive_turn_summary(
+            (user, assistant),
+            max_words=self._summary_fragment_budget,
+        )
         if fragment:
             self._summary_fragments.append(fragment)
             if len(self._summary_fragments) > self.max_summary_turns:
