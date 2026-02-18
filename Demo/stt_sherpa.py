@@ -13,7 +13,6 @@ Provides four recognition modes:
 """
 from __future__ import annotations
 
-from collections import deque
 import os
 import time
 from pathlib import Path
@@ -121,20 +120,48 @@ def _init_vad() -> Optional[object]:
         print(f"[sherpa-vad] silero_vad.onnx not found at {vad_model}", flush=True)
         return None
 
+    def _env_float(name: str, default: float) -> float:
+        raw = (os.environ.get(name) or "").strip()
+        if not raw:
+            return float(default)
+        try:
+            return float(raw)
+        except Exception:
+            return float(default)
+
+    def _env_int(name: str, default: int) -> int:
+        raw = (os.environ.get(name) or "").strip()
+        if not raw:
+            return int(default)
+        try:
+            return int(raw)
+        except Exception:
+            return int(default)
+
+    threshold = _env_float("SHERPA_VAD_THRESHOLD", 0.5)
+    min_silence = _env_float("SHERPA_VAD_MIN_SILENCE", 0.5)
+    min_speech = _env_float("SHERPA_VAD_MIN_SPEECH", 0.25)
+    window_size = _env_int("SHERPA_VAD_WINDOW_SIZE", 512)
+    buffer_seconds = _env_int("SHERPA_VAD_BUFFER_SECONDS", 30)
+
     try:
         config = sherpa_onnx.VadModelConfig()
         config.silero_vad.model = str(vad_model)
-        config.silero_vad.threshold = 0.5
-        config.silero_vad.min_silence_duration = 0.5
-        config.silero_vad.min_speech_duration = 0.25
-        config.silero_vad.window_size = 512  # 32ms at 16kHz
+        config.silero_vad.threshold = threshold
+        config.silero_vad.min_silence_duration = min_silence
+        config.silero_vad.min_speech_duration = min_speech
+        config.silero_vad.window_size = window_size  # 32ms at 16kHz when 512
         config.sample_rate = SAMPLE_RATE
         config.num_threads = 1
         config.provider = "cpu"
         config.debug = False
 
-        vad = sherpa_onnx.VoiceActivityDetector(config, buffer_size_in_seconds=30)
-        print(f"[sherpa-vad] VoiceActivityDetector initialized from {vad_model}", flush=True)
+        vad = sherpa_onnx.VoiceActivityDetector(config, buffer_size_in_seconds=buffer_seconds)
+        print(
+            f"[sherpa-vad] VoiceActivityDetector initialized from {vad_model} "
+            f"(thr={threshold}, min_speech={min_speech}, min_silence={min_silence}, win={window_size})",
+            flush=True,
+        )
     except Exception as exc:  # pragma: no cover
         print(f"[sherpa-vad] Failed to init VAD: {exc}", flush=True)
         return None
@@ -380,16 +407,12 @@ def vad_stream_recognize_one(
         print("[sherpa-vad] VAD not available, falling back to endpoint-only mode.", flush=True)
         return stream_recognize_until_endpoint(input_device, max_seconds)
 
-    # silero-vad window size (must match config)
+    # Keep ASR stream always running. VAD is used only for utterance boundary.
     window_size = 512
-    pre_roll_windows = max(0, int(os.environ.get("SHERPA_VAD_PRE_ROLL_WINDOWS", "8")))
-    # Warm-up: number of windows to read and discard before feeding VAD/ASR.
-    # This helps avoid cutting off the first word on some devices.
     warmup_windows = 5  # ~0.16s at 16kHz
     speech_active = False
-    stream = None
     text = ""
-    pre_roll = deque(maxlen=pre_roll_windows)
+    stream = recognizer.create_stream()
     t0 = time.perf_counter()
 
     print("[sherpa-vad] Listening... (VAD will detect speech automatically)", flush=True)
@@ -401,14 +424,12 @@ def vad_stream_recognize_one(
             dtype="float32",
             device=input_device,
         ) as mic:
-            # Warm-up: read and discard a few windows before starting VAD/ASR
             try:
                 print("[sherpa-vad] warming up mic...", flush=True)
                 for _ in range(warmup_windows):
                     mic.read(window_size)
                 print("[sherpa-vad] ready, detecting speech...", flush=True)
             except Exception:
-                # If warm-up fails, continue anyway; better to have STT than crash.
                 print("[sherpa-vad] warm-up skipped due to error.", flush=True)
 
             while True:
@@ -420,63 +441,52 @@ def vad_stream_recognize_one(
                 data, _ = mic.read(window_size)
                 samples = data.reshape(-1).astype(np.float32)
 
+                # ASR always-on path: collect/decode continuously.
+                stream.accept_waveform(SAMPLE_RATE, samples)
+                while recognizer.is_ready(stream):
+                    recognizer.decode_stream(stream)
+
+                # VAD only determines turn boundary.
                 vad.accept_waveform(samples)
                 is_speech = vad.is_speech_detected()
-
-                # Speech just started → create a fresh OnlineRecognizer stream
                 if is_speech and not speech_active:
                     speech_active = True
-                    stream = recognizer.create_stream()
-                    if pre_roll:
-                        try:
-                            lead = np.concatenate(list(pre_roll)).astype(np.float32, copy=False)
-                            if lead.size > 0:
-                                stream.accept_waveform(SAMPLE_RATE, lead)
-                        except Exception:
-                            pass
                     print("[sherpa-vad] speech detected", flush=True)
 
-                # Feed audio to recognizer while speech is active
-                if speech_active and stream is not None:
-                    stream.accept_waveform(SAMPLE_RATE, samples)
-                    while recognizer.is_ready(stream):
-                        recognizer.decode_stream(stream)
-                pre_roll.append(samples)
-
-                # Check for complete speech segments from VAD
                 while not vad.empty():
                     vad.pop()
-                    if speech_active and stream is not None:
-                        # Finalize this utterance
-                        tail = np.zeros(int(0.2 * SAMPLE_RATE), dtype=np.float32)
-                        stream.accept_waveform(SAMPLE_RATE, tail)
-                        stream.input_finished()
-                        while recognizer.is_ready(stream):
-                            recognizer.decode_stream(stream)
+                    if not speech_active:
+                        continue
 
-                        result = recognizer.get_result(stream)
-                        text = str(result).strip()
-                        print(f"[sherpa-vad] utterance: {repr(text)}", flush=True)
+                    # End of one VAD utterance: finalize current stream snapshot.
+                    tail = np.zeros(int(0.2 * SAMPLE_RATE), dtype=np.float32)
+                    stream.accept_waveform(SAMPLE_RATE, tail)
+                    stream.input_finished()
+                    while recognizer.is_ready(stream):
+                        recognizer.decode_stream(stream)
 
-                        stream = None
-                        speech_active = False
-                        # One utterance done → return
-                        if text:
-                            elapsed = time.perf_counter() - t0
-                            return text, elapsed
+                    result = recognizer.get_result(stream)
+                    text = str(result).strip()
+                    print(f"[sherpa-vad] utterance: {repr(text)}", flush=True)
+                    if text:
+                        elapsed = time.perf_counter() - t0
+                        return text, elapsed
+
+                    # Prepare next segment even if current segment was empty.
+                    speech_active = False
+                    stream = recognizer.create_stream()
     except Exception as exc:  # pragma: no cover
         print(f"[sherpa-vad] error: {exc}", flush=True)
 
-    # If we timed out but had an active stream, try to get partial result
-    if speech_active and stream is not None:
-        try:
-            stream.input_finished()
-            while recognizer.is_ready(stream):
-                recognizer.decode_stream(stream)
-            result = recognizer.get_result(stream)
-            text = str(result).strip()
-        except Exception:
-            pass
+    # Timed out: finalize whatever has been collected.
+    try:
+        stream.input_finished()
+        while recognizer.is_ready(stream):
+            recognizer.decode_stream(stream)
+        result = recognizer.get_result(stream)
+        text = str(result).strip()
+    except Exception:
+        pass
 
     elapsed = time.perf_counter() - t0
     print(f"[sherpa-vad] final text: {repr(text)} ({elapsed:.2f}s)", flush=True)

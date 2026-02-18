@@ -5,6 +5,7 @@ import gc
 import os
 import sys
 import time
+import re
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -77,6 +78,45 @@ def _build_gemini_prompt(mode: str, context: str) -> str:
     if "{{CONTEXT}}" in template:
         return template.replace("{{CONTEXT}}", (context or "").strip())
     return f"{template}\n\nContext:\n{(context or '').strip()}\n"
+
+
+def _normalize_asr_text(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    cleaned = re.sub(r"\s+", " ", raw)
+    cleaned = re.sub(r"^[`'\".,!?;:()\[\]{}\-_/\\]+", "", cleaned)
+    cleaned = re.sub(r"^(?:'S|S)\b\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _repair_asr_leading_fragment(text: str) -> str:
+    cleaned = _normalize_asr_text(text)
+    if not cleaned:
+        return ""
+    tokens = cleaned.split()
+    if len(tokens) >= 3 and len(tokens[0]) <= 3 and len(tokens[1]) >= 5:
+        cleaned = " ".join(tokens[1:]).strip()
+    return cleaned
+
+
+def _is_low_quality_asr_input(text: str) -> bool:
+    cleaned = _normalize_asr_text(text)
+    if not cleaned:
+        return True
+    tokens = re.findall(r"[A-Za-z0-9']+", cleaned)
+    if not tokens:
+        return True
+    if len(tokens) == 1 and len(tokens[0]) <= 2:
+        return True
+    if len(tokens) == 2 and all(len(t) <= 2 for t in tokens):
+        return True
+    return False
+
+
+def _build_repeat_prompt() -> str:
+    return "I may have missed the beginning. Please say that once more."
 
 
 # ── TTS helper ─────────────────────────────────────────────────────────────
@@ -696,6 +736,22 @@ def _run_turn_brain(
     conversation: Optional[text_utils.ConversationBuffer] = None,
 ) -> Optional[str]:
     """Route using router, call Gemini or legacy path, then TTS."""
+    repaired_text = _repair_asr_leading_fragment(text)
+    if repaired_text != (text or "").strip():
+        print(f"[ASR] normalized -> {repaired_text!r}", flush=True)
+    if _is_low_quality_asr_input(repaired_text):
+        retry_text = _build_repeat_prompt()
+        print("[ASR] low-quality turn; requesting repeat.", flush=True)
+        try:
+            tts_audio, tts_sr = _synthesize_tts(tts, voice, retry_text)
+            if args.trim_start > 0.0:
+                tts_audio = audio_io.trim_start_seconds(tts_audio, tts_sr, args.trim_start)
+            audio_io.play_audio(tts_audio, tts_sr, args.output_device, volume=args.volume)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[error] TTS failed on repeat prompt: {exc}", file=sys.stderr)
+        return retry_text
+    text = repaired_text
+
     llm_prompt = text
     if conversation is not None and len(conversation) > 0:
         llm_prompt = conversation.format_prompt_with_context(text)
@@ -908,6 +964,21 @@ def _run_turn_brain_sentence(
     conversation: Optional[text_utils.ConversationBuffer] = None,
 ) -> Tuple[Optional[str], Optional[np.ndarray], Optional[int]]:
     """Sentence-streaming version: returns (reply_text, tts_audio, tts_sr) without playing."""
+    repaired_text = _repair_asr_leading_fragment(text)
+    if repaired_text != (text or "").strip():
+        print(f"[ASR] normalized -> {repaired_text!r}", flush=True)
+    if _is_low_quality_asr_input(repaired_text):
+        retry_text = _build_repeat_prompt()
+        try:
+            tts_audio, tts_sr = _synthesize_tts(tts, voice, retry_text)
+            if args.trim_start > 0.0:
+                tts_audio = audio_io.trim_start_seconds(tts_audio, tts_sr, args.trim_start)
+            return retry_text, tts_audio, tts_sr
+        except Exception as exc:  # noqa: BLE001
+            print(f"[error] TTS failed on repeat prompt: {exc}", file=sys.stderr)
+            return retry_text, None, None
+    text = repaired_text
+
     llm_prompt = text
     if conversation is not None and len(conversation) > 0:
         llm_prompt = conversation.format_prompt_with_context(text)
