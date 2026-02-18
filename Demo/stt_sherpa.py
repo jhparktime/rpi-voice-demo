@@ -13,6 +13,7 @@ Provides four recognition modes:
 """
 from __future__ import annotations
 
+from collections import deque
 import os
 import time
 from pathlib import Path
@@ -347,12 +348,14 @@ def vad_stream_recognize_one(
 
     # silero-vad window size (must match config)
     window_size = 512
+    pre_roll_windows = max(0, int(os.environ.get("SHERPA_VAD_PRE_ROLL_WINDOWS", "8")))
     # Warm-up: number of windows to read and discard before feeding VAD/ASR.
     # This helps avoid cutting off the first word on some devices.
     warmup_windows = 5  # ~0.16s at 16kHz
     speech_active = False
     stream = None
     text = ""
+    pre_roll = deque(maxlen=pre_roll_windows)
     t0 = time.perf_counter()
 
     print("[sherpa-vad] Listening... (VAD will detect speech automatically)", flush=True)
@@ -390,6 +393,13 @@ def vad_stream_recognize_one(
                 if is_speech and not speech_active:
                     speech_active = True
                     stream = recognizer.create_stream()
+                    if pre_roll:
+                        try:
+                            lead = np.concatenate(list(pre_roll)).astype(np.float32, copy=False)
+                            if lead.size > 0:
+                                stream.accept_waveform(SAMPLE_RATE, lead)
+                        except Exception:
+                            pass
                     print("[sherpa-vad] speech detected", flush=True)
 
                 # Feed audio to recognizer while speech is active
@@ -397,6 +407,7 @@ def vad_stream_recognize_one(
                     stream.accept_waveform(SAMPLE_RATE, samples)
                     while recognizer.is_ready(stream):
                         recognizer.decode_stream(stream)
+                pre_roll.append(samples)
 
                 # Check for complete speech segments from VAD
                 while not vad.empty():
