@@ -25,6 +25,7 @@ Demo/stt_tts_cli.py + Demo/tts_kokoro.py use these Kokoro files.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -77,6 +78,62 @@ SILERO_VAD_URL = (
     "silero_vad.onnx"
 )
 
+# Router/Intent embedding model (SentenceTransformer)
+ROUTER_EMBEDDING_REPO = "sentence-transformers/all-MiniLM-L6-v2"
+
+# Memory extractive summarizer ONNX encoder
+MEMORY_MINILM_ONNX_REPO = "Xenova/all-MiniLM-L6-v2"
+
+# Optional fallback source for filler ONNX bundle.
+# If not set, script only checks existing local bundle.
+FILLER_ONNX_SOURCE_REPO_ENV = "FILLER_ONNX_SOURCE_REPO"
+
+ROUTER_EMBEDDING_PATTERNS: Iterable[str] = (
+    "modules.json",
+    "config_sentence_transformers.json",
+    "sentence_bert_config.json",
+    "1_Pooling/config.json",
+    "config.json",
+    "model.safetensors",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "vocab.txt",
+)
+
+MEMORY_MINILM_ONNX_PATTERNS: Iterable[str] = (
+    "onnx/*.onnx",
+    "*.onnx",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "vocab.json",
+    "merges.txt",
+    "spiece.model",
+    "config.json",
+)
+
+FILLER_ONNX_PATTERNS: Iterable[str] = (
+    "onnx/model.onnx",
+    "onnx/model.int8.onnx",
+    "onnx/config.json",
+    "onnx/generation_config.json",
+    "onnx/tokenizer.json",
+    "onnx/tokenizer_config.json",
+    "onnx/special_tokens_map.json",
+    "onnx/vocab.json",
+    "onnx/merges.txt",
+    "onnx/chat_template.jinja",
+    "config.json",
+    "generation_config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "vocab.json",
+    "merges.txt",
+    "chat_template.jinja",
+)
+
 
 def _download_file(url: str, dst: Path, desc: str) -> None:
     """Stream download a file to dst."""
@@ -91,6 +148,68 @@ def _download_file(url: str, dst: Path, desc: str) -> None:
                 f.write(chunk)
     size = dst.stat().st_size if dst.exists() else 0
     print(f"[info] Saved {desc} to {dst} ({size} bytes)")
+
+
+def _ensure_hf_snapshot_dir(
+    root: Path,
+    *,
+    repo_id: str,
+    dst_rel: str,
+    allow_patterns: Iterable[str],
+    required_relpaths: Iterable[str],
+    desc: str,
+) -> bool:
+    """Download selected HuggingFace repo files into a fixed local directory."""
+    dst_dir = root / dst_rel
+    if all((dst_dir / p).exists() for p in required_relpaths):
+        print(f"[info] {desc} already present under {dst_dir}")
+        return True
+
+    try:
+        from huggingface_hub import snapshot_download
+    except Exception as exc:  # noqa: BLE001
+        print(f"[error] huggingface_hub import failed for {desc}: {exc}", file=sys.stderr)
+        return False
+
+    print(f"[info] Downloading {desc} from {repo_id} ...")
+    try:
+        snap = snapshot_download(
+            repo_id=repo_id,
+            allow_patterns=list(allow_patterns),
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[error] Failed snapshot download for {repo_id}: {exc}", file=sys.stderr)
+        return False
+
+    src_root = Path(snap)
+    dst_dir.mkdir(parents=True, exist_ok=True)
+
+    copied = 0
+    for src in src_root.rglob("*"):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(src_root)
+        dst = dst_dir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        copied += 1
+
+    # Some ONNX repos expose only model.int8.onnx; normalize for loaders expecting model.onnx.
+    int8_path = dst_dir / "onnx" / "model.int8.onnx"
+    default_path = dst_dir / "onnx" / "model.onnx"
+    if not default_path.exists() and int8_path.exists():
+        shutil.copy2(int8_path, default_path)
+
+    missing = [p for p in required_relpaths if not (dst_dir / p).exists()]
+    if missing:
+        print(
+            f"[error] {desc} missing expected files after download: {missing}",
+            file=sys.stderr,
+        )
+        return False
+
+    print(f"[done] {desc} ready under {dst_dir} (copied {copied} files)")
+    return True
 
 
 def _ensure_sherpa_stt(root: Path) -> bool:
@@ -395,6 +514,64 @@ def main() -> int:
     # sherpa-onnx VAD (silero-vad ONNX) for always-listening mode
     sherpa_vad_ready = _ensure_sherpa_vad(root)
 
+    # === Router/Intent embedding model (SentenceTransformer all-MiniLM-L6-v2) ===
+    router_embedding_ready = _ensure_hf_snapshot_dir(
+        root,
+        repo_id=ROUTER_EMBEDDING_REPO,
+        dst_rel="models/all-MiniLM-L6-v2",
+        allow_patterns=ROUTER_EMBEDDING_PATTERNS,
+        required_relpaths=("modules.json", "model.safetensors", "tokenizer.json"),
+        desc="router/intent embedding model",
+    )
+    if not router_embedding_ready:
+        return 1
+
+    # === Memory MiniLM ONNX encoder (extractive summary) ===
+    memory_minilm_ready = _ensure_hf_snapshot_dir(
+        root,
+        repo_id=MEMORY_MINILM_ONNX_REPO,
+        dst_rel="models/Xenova-all-MiniLM-L6-v2",
+        allow_patterns=MEMORY_MINILM_ONNX_PATTERNS,
+        required_relpaths=("onnx/model.onnx", "tokenizer.json"),
+        desc="memory MiniLM ONNX encoder",
+    )
+    if not memory_minilm_ready:
+        return 1
+
+    # === Filler ONNX bundle (fine-tuned preferred). ===
+    # Priority:
+    # 1) Existing local bundle under models/smollm2-135m-filler-colab-onnx-bundle
+    # 2) Optional repo via env FILLER_ONNX_SOURCE_REPO
+    filler_bundle_dir = root / "models" / "smollm2-135m-filler-colab-onnx-bundle"
+    filler_model = filler_bundle_dir / "onnx" / "model.onnx"
+    filler_int8 = filler_bundle_dir / "onnx" / "model.int8.onnx"
+    filler_ready = False
+    if filler_model.exists():
+        filler_ready = True
+        print(f"[info] Filler ONNX bundle already present under {filler_bundle_dir}")
+    elif filler_int8.exists():
+        filler_model.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(filler_int8, filler_model)
+        filler_ready = True
+        print(f"[info] Normalized filler ONNX: {filler_int8} -> {filler_model}")
+    else:
+        filler_repo = (os.environ.get(FILLER_ONNX_SOURCE_REPO_ENV) or "").strip()
+        if filler_repo:
+            filler_ready = _ensure_hf_snapshot_dir(
+                root,
+                repo_id=filler_repo,
+                dst_rel="models/smollm2-135m-filler-colab-onnx-bundle",
+                allow_patterns=FILLER_ONNX_PATTERNS,
+                required_relpaths=("onnx/model.onnx", "tokenizer.json"),
+                desc="filler ONNX bundle",
+            )
+        else:
+            print(
+                "[warn] Filler ONNX bundle missing. Put your fine-tuned bundle at "
+                f"{filler_bundle_dir} or set {FILLER_ONNX_SOURCE_REPO_ENV}=<hf_repo_id>.",
+                file=sys.stderr,
+            )
+
     # Final status summary (best-effort)
     try:
         emo_size = target_onnx.stat().st_size if target_onnx.exists() else 0
@@ -409,6 +586,18 @@ def main() -> int:
             print(f"[summary] sherpa-onnx TTS: {root / 'sherpa_tts'}")
         if sherpa_vad_ready:
             print(f"[summary] sherpa-onnx VAD: {root / 'sherpa_vad' / 'silero_vad.onnx'}")
+        if router_embedding_ready:
+            print(f"[summary] router/intent MiniLM: {root / 'models' / 'all-MiniLM-L6-v2'}")
+        if memory_minilm_ready:
+            print(f"[summary] memory MiniLM ONNX: {root / 'models' / 'Xenova-all-MiniLM-L6-v2'}")
+        if filler_ready:
+            print(f"[summary] filler ONNX: {filler_bundle_dir / 'onnx' / 'model.onnx'}")
+        else:
+            print("[summary] filler ONNX: missing (see warning above)")
+        print("[summary] Recommended env:")
+        print(f"  export ROUTER_EMBEDDING_MODEL=\"{root / 'models' / 'all-MiniLM-L6-v2'}\"")
+        print(f"  export MEMORY_MINILM_ONNX_DIR=\"{root / 'models' / 'Xenova-all-MiniLM-L6-v2'}\"")
+        print(f"  export FILLER_ONNX_MODEL=\"{root / 'models' / 'smollm2-135m-filler-colab-onnx-bundle'}\"")
     except OSError:
         pass
 
@@ -417,4 +606,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

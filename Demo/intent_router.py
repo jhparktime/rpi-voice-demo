@@ -1,6 +1,7 @@
 """Intent routing and bridge templates for CLOUD/LOCAL routing."""
 from __future__ import annotations
 
+import os
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -107,6 +108,7 @@ COMPLEX_CLOUD_ANCHORS: List[str] = [
 _intent_embedder: Optional[SentenceTransformer] = None
 _easy_vec: Optional[np.ndarray] = None
 _complex_vec: Optional[np.ndarray] = None
+_INTENT_EMBEDDING_MODEL = os.environ.get("ROUTER_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 
 
 def normalize_vec(v: np.ndarray) -> np.ndarray:
@@ -199,7 +201,7 @@ def _ensure_intent_embedder() -> None:
     if _intent_embedder is not None and _easy_vec is not None and _complex_vec is not None:
         return
 
-    _intent_embedder = SentenceTransformer("all-MiniLM-L6-v2")
+    _intent_embedder = SentenceTransformer(_INTENT_EMBEDDING_MODEL)
     easy_embs = _intent_embedder.encode(EASY_LOCAL_ANCHORS, convert_to_numpy=True).astype(np.float32, copy=False)
     complex_embs = _intent_embedder.encode(COMPLEX_CLOUD_ANCHORS, convert_to_numpy=True).astype(np.float32, copy=False)
     easy_embs = easy_embs / (np.linalg.norm(easy_embs, axis=1, keepdims=True) + 1e-12)
