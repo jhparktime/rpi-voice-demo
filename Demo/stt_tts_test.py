@@ -124,7 +124,7 @@ def _watch_for_barge_in(
             device=input_device,
         ) as mic:
             while not stop_event.is_set():
-                data, _ = mic.read(window_samples, blocking=True)
+                data, _ = mic.read(window_samples)
                 if not isinstance(data, np.ndarray) or data.size <= 0:
                     continue
                 level = float(np.mean(np.abs(data.reshape(-1).astype(np.float32))))
