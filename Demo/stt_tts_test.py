@@ -678,13 +678,13 @@ def _run_gemini_turn(
         if route_mode == "SHORT":
             assistant_reply = text_utils.postprocess_output(
                 cloud_reply,
-                max_sentences=2,
+                max_sentences=0,
                 max_words=120,
             )
         else:
             assistant_reply = text_utils.postprocess_output(
                 cloud_reply,
-                max_sentences=4,
+                max_sentences=0,
                 max_words=260,
             )
     else:
@@ -864,11 +864,10 @@ def _run_turn_brain(
 
         # Postprocess Cloud reply length (sentences/words) for RPi-friendly TTS
         if cloud_reply and not cloud_reply.startswith("("):
-            max_sents = getattr(args, "cloud_max_sentences", 2)
             max_words = getattr(args, "cloud_max_words", 60)
             cloud_text = text_utils.postprocess_output(
                 cloud_reply,
-                max_sentences=max_sents,
+                max_sentences=0,
                 max_words=max_words,
             )
         else:
@@ -1089,11 +1088,10 @@ def _run_turn_brain_sentence(
 
         # Postprocess Cloud reply length (sentences/words) for RPi-friendly TTS
         if cloud_reply and not cloud_reply.startswith("("):
-            max_sents = getattr(args, "cloud_max_sentences", 2)
             max_words = getattr(args, "cloud_max_words", 60)
             cloud_text = text_utils.postprocess_output(
                 cloud_reply,
-                max_sentences=max_sents,
+                max_sentences=0,
                 max_words=max_words,
             )
         else:
