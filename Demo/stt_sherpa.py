@@ -235,10 +235,20 @@ def stream_recognize_until_endpoint(
 
     chunk_samples = int(CHUNK_SECONDS * SAMPLE_RATE)
     stream = recognizer.create_stream()
+    warmup_chunks = 4  # ~0.4s at CHUNK_SECONDS=0.1
     text = ""
     t0 = time.perf_counter()
 
     print("[sherpa] Listening... (speak now, endpoint will auto-detect)", flush=True)
+
+    # Prime decoder path with short silence to reduce first-token clipping.
+    try:
+        prime = np.zeros(int(0.12 * SAMPLE_RATE), dtype=np.float32)
+        stream.accept_waveform(SAMPLE_RATE, prime)
+        while recognizer.is_ready(stream):
+            recognizer.decode_stream(stream)
+    except Exception:
+        pass
 
     last_logged_text = ""
     try:
@@ -248,6 +258,14 @@ def stream_recognize_until_endpoint(
             dtype="float32",
             device=input_device,
         ) as mic:
+            try:
+                print("[sherpa] warming up mic...", flush=True)
+                for _ in range(warmup_chunks):
+                    mic.read(chunk_samples)
+                print("[sherpa] ready, detecting speech...", flush=True)
+            except Exception:
+                print("[sherpa] warm-up skipped due to error.", flush=True)
+
             while True:
                 elapsed = time.perf_counter() - t0
                 if elapsed >= max_seconds:
