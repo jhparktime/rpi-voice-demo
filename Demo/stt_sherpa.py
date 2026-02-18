@@ -13,6 +13,7 @@ Provides four recognition modes:
 """
 from __future__ import annotations
 
+from collections import deque
 import os
 import time
 from pathlib import Path
