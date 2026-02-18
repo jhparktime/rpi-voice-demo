@@ -425,8 +425,6 @@ def vad_stream_recognize_one(
                             break
                 if fallback_endpoint:
                     break
-            if fallback_endpoint:
-                break
     except Exception as exc:  # pragma: no cover
         print(f"[sherpa-vad] error: {exc}", flush=True)
 
