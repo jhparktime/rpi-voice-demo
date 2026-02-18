@@ -203,16 +203,16 @@ def stream_ollama_tts_chunks(
         # Flush remainder
         if buffer.strip():
             try:
-                    tts_audio, tts_sr = tts_sherpa.synthesize_sherpa_tts(buffer.strip())
-                    if trim_start > 0.0:
-                        tts_audio = audio_io.trim_start_seconds(tts_audio, tts_sr, trim_start)
-                    if first_play_timestamp is not None and len(first_play_timestamp) == 0:
-                        first_play_timestamp.append(time.perf_counter())
-                    if stop_event is not None and stop_event.is_set():
-                        return "".join(full_response).strip()
-                    audio_io.play_audio(tts_audio, tts_sr, output_device, volume=volume)
-                except Exception as e:  # noqa: BLE001
-                    print(f"[error] TTS chunk failed: {e}", file=sys.stderr)
+                tts_audio, tts_sr = tts_sherpa.synthesize_sherpa_tts(buffer.strip())
+                if trim_start > 0.0:
+                    tts_audio = audio_io.trim_start_seconds(tts_audio, tts_sr, trim_start)
+                if first_play_timestamp is not None and len(first_play_timestamp) == 0:
+                    first_play_timestamp.append(time.perf_counter())
+                if stop_event is not None and stop_event.is_set():
+                    return "".join(full_response).strip()
+                audio_io.play_audio(tts_audio, tts_sr, output_device, volume=volume)
+            except Exception as e:  # noqa: BLE001
+                print(f"[error] TTS chunk failed: {e}", file=sys.stderr)
         return "".join(full_response).strip()
     except requests.exceptions.Timeout:
         return "(Ollama error: timeout)"
