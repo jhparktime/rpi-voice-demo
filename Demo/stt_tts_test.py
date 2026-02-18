@@ -37,6 +37,9 @@ SLOW_ASR_WARN_THRESHOLD = 10.0
 _GEMINI_TEMPLATE_SHORT = "gemini_short.txt"
 _GEMINI_TEMPLATE_LONG = "gemini_long.txt"
 _GEMINI_PROMPT_CACHE: dict[str, str] = {}
+_FILLER_ONNX_MODEL: Any = None
+_FILLER_ONNX_TOKENIZER: Any = None
+_FILLER_ONNX_MODEL_ID = ""
 
 
 def _load_prompt_template(filename: str, fallback: str) -> str:
@@ -490,53 +493,81 @@ def _run_turn_ollama_or_direct(t0: float, args: Any, text: str, tts: Any, voice:
 
 # ── Filler generation ──────────────────────────────────────────────────────
 
+def _resolve_filler_onnx_model_id(args: Any) -> str:
+    env_model = (os.environ.get("FILLER_ONNX_MODEL") or "").strip()
+    if env_model:
+        return env_model
+
+    local_bundle = Path(__file__).resolve().parent.parent / "models" / "smollm2-135m-filler-colab-onnx-bundle"
+    if local_bundle.exists():
+        return str(local_bundle)
+
+    arg_model = (getattr(args, "onnx_model", "") or "").strip()
+    if arg_model:
+        return arg_model
+
+    return "HuggingFaceTB/SmolLM2-135M-Instruct"
+
+
+def _get_filler_onnx_runtime(args: Any) -> Tuple[Any, Any, str]:
+    global _FILLER_ONNX_MODEL, _FILLER_ONNX_TOKENIZER, _FILLER_ONNX_MODEL_ID
+
+    model_id = _resolve_filler_onnx_model_id(args)
+    if _FILLER_ONNX_MODEL is not None and _FILLER_ONNX_TOKENIZER is not None and _FILLER_ONNX_MODEL_ID == model_id:
+        return _FILLER_ONNX_MODEL, _FILLER_ONNX_TOKENIZER, model_id
+
+    model, tokenizer = llm_onnx._load_onnx_llm(model_id)
+    if model is None or tokenizer is None:
+        return None, None, model_id
+
+    _FILLER_ONNX_MODEL = model
+    _FILLER_ONNX_TOKENIZER = tokenizer
+    _FILLER_ONNX_MODEL_ID = model_id
+    return model, tokenizer, model_id
+
+
 def _generate_filler_ollama(
     args: Any,
     emotion_label: Optional[str],
     user_text: str,
     timeout: float = 3.0,
 ) -> str:
-    """Generate short smolLM2 filler phrase for Gemini delay gate."""
+    """Generate short filler phrase using fine-tuned ONNX model for Gemini delay gate."""
     filler_enabled = getattr(args, "cloud_filler", ENABLE_CLOUD_FILLER)
     if not filler_enabled:
         print("[Filler] Skipped (disabled by --no-cloud-filler)", flush=True)
         return ""
 
     filler_provider = (getattr(args, "filler_provider", "off") or "off").strip().lower()
-    if filler_provider != "smollm2":
+    if filler_provider not in {"smollm2", "onnx", "smollm2_onnx"}:
         print(f"[Filler] Skipped (provider={filler_provider})", flush=True)
         return ""
-    
-    if not args.ollama:
-        print("[Filler] Skipped (Ollama not enabled; use --ollama flag)", flush=True)
-        return ""
-    
-    print("[Filler] Generating smolLM2 filler...", flush=True)
+
+    print("[Filler] Generating ONNX filler...", flush=True)
     system = text_utils.build_cloud_filler_system_prompt(emotion_label)
     try:
+        model, tokenizer, model_id = _get_filler_onnx_runtime(args)
+        if model is None or tokenizer is None:
+            print(f"[Filler] ONNX model unavailable: {model_id}", flush=True)
+            return text_utils.fallback_cloud_filler(user_text)
+
         filler_prompt = (
             "User just said: "
             f"{user_text!r}\n"
             "Generate ONE short spoken bridge phrase (3-12 words) while you think. "
             "Do NOT answer the question or give details."
         )
-        filler = llm_ollama.generate_ollama(
+        filler = llm_onnx.generate_onnx_llm(
             prompt=filler_prompt,
-            model=args.ollama_model,
             system=system,
-            url=args.ollama_url,
-            num_predict=20,  # Slightly longer budget for 6-10 word fillers
+            model=model,
+            tokenizer=tokenizer,
+            max_new_tokens=20,
             temperature=0.5,
-            stop=["\n"],
-            keep_alive=args.ollama_keep_alive,
-            num_thread=args.ollama_num_thread,
-            num_ctx=128,  # Minimal context
-            num_batch=args.ollama_num_batch,
             max_sentences=1,
             max_words=12,
-            timeout=timeout,
         )
-        raw = filler.strip() if filler and not filler.startswith("(") else ""
+        raw = filler.strip() if filler and not filler.startswith("(ONNX LLM") else ""
         result = text_utils.validate_cloud_filler_output(raw)
         if not result:
             if raw:
@@ -709,7 +740,7 @@ def _run_gemini_turn(
                     f"delay_ms={delay_ms}",
                     flush=True,
                 )
-                filler_text = _generate_filler_ollama(args, emotion_label, prompt_context, timeout=3.0)
+                filler_text = _generate_filler_ollama(args, emotion_label, user_text, timeout=3.0)
                 if filler_text:
                     print(f"[FILLER] {filler_text}", flush=True)
                     fut_filler_tts = executor.submit(_play_filler_tts, tts, voice, filler_text, args)
@@ -1277,7 +1308,29 @@ def _warmup(args: Any, emotion_classifier: Optional[EmotionClassifierONNX]) -> N
         except Exception as exc:  # noqa: BLE001
             print(f"[Warmup] Memory ONNX warning: {exc}", file=sys.stderr)
 
-    # 6. Optional ONNX LLM warmup
+    # 6. ONNX filler model warmup
+    filler_provider = (getattr(args, "filler_provider", "off") or "off").strip().lower()
+    if warmup_all_onnx and filler_provider in {"smollm2", "onnx", "smollm2_onnx"}:
+        print("[Warmup] Loading ONNX filler model...", flush=True)
+        try:
+            filler_model, filler_tokenizer, _ = _get_filler_onnx_runtime(args)
+            if filler_model is not None and filler_tokenizer is not None:
+                _ = llm_onnx.generate_onnx_llm(
+                    prompt="Warmup filler",
+                    system=text_utils.build_cloud_filler_system_prompt(None),
+                    model=filler_model,
+                    tokenizer=filler_tokenizer,
+                    max_new_tokens=4,
+                    temperature=0.0,
+                    max_sentences=1,
+                    max_words=8,
+                )
+            else:
+                print("[Warmup] ONNX filler model unavailable.", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Warmup] ONNX filler warning: {exc}", file=sys.stderr)
+
+    # 7. Optional ONNX LLM warmup
     warmup_onnx_llm = getattr(args, "onnx_llm", False) or (
         os.environ.get("WARMUP_ONNX_LLM", "0").strip() not in {"0", "false", "False", "no", "NO"}
     )
@@ -1301,7 +1354,7 @@ def _warmup(args: Any, emotion_classifier: Optional[EmotionClassifierONNX]) -> N
         except Exception as exc:  # noqa: BLE001
             print(f"[Warmup] ONNX LLM warning: {exc}", file=sys.stderr)
     
-    # 7. Ollama LLM (if enabled)
+    # 8. Ollama LLM (if enabled)
     if args.ollama:
         print(f"[Warmup] Warming up Ollama ({args.ollama_model})...", flush=True)
         try:
