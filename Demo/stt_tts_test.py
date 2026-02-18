@@ -1131,6 +1131,14 @@ def _warmup(args: Any, emotion_classifier: Optional[EmotionClassifierONNX]) -> N
             _ = stt_sherpa.get_vad()
         except Exception as exc:  # noqa: BLE001
             print(f"[Warmup] VAD warning: {exc}", file=sys.stderr)
+        try:
+            # Prime mic input so the first real user turn is not clipped.
+            _ = stt_sherpa.prime_microphone_input(
+                input_device=args.input_device,
+                seconds=float(os.environ.get("SHERPA_MIC_PRIME_SECONDS", "0.8")),
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Warmup] Mic prime warning: {exc}", file=sys.stderr)
     
     # 2. TTS (sherpa-onnx OfflineTts)
     print("[Warmup] Loading TTS...", flush=True)

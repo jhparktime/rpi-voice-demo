@@ -148,6 +148,40 @@ def get_vad() -> Optional[object]:
     return _init_vad()
 
 
+def prime_microphone_input(
+    input_device: Optional[int] = None,
+    seconds: float = 0.8,
+) -> bool:
+    """Open mic once and discard a short buffer to stabilize first-turn capture."""
+    if seconds <= 0:
+        return False
+
+    try:
+        import sounddevice as sd
+    except Exception:
+        return False
+
+    frames = max(1, int(seconds * SAMPLE_RATE))
+    window = 512
+    consumed = 0
+    try:
+        with sd.InputStream(
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype="float32",
+            device=input_device,
+        ) as mic:
+            while consumed < frames:
+                n = min(window, frames - consumed)
+                mic.read(n)
+                consumed += n
+        print(f"[sherpa] mic primed ({seconds:.2f}s)", flush=True)
+        return True
+    except Exception as exc:
+        print(f"[sherpa] mic prime skipped: {exc}", flush=True)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Mode 1: transcribe a pre-recorded buffer (Phase 1 fallback)
 # ---------------------------------------------------------------------------
