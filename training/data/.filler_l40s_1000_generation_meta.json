@@ -1,0 +1,15 @@
+{
+  "generated_at_utc": "2026-02-18 10:22:57 UTC",
+  "set_name": "l40s_1000_seed42_template",
+  "seed": 42,
+  "teacher_backend": "template",
+  "train_size": 1000,
+  "val_size": 200,
+  "n_candidates": 6,
+  "synthetic_sources": 2000,
+  "strict_filter": true,
+  "topic_aware_templates": true,
+  "train_path": "training/data/filler_train_l40s_1000.jsonl",
+  "val_path": "training/data/filler_val_l40s_1000.jsonl",
+  "reject_path": "training/data/filler_rejects_l40s_1000.jsonl"
+}
