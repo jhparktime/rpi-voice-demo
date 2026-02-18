@@ -104,11 +104,24 @@ def _call_gemini(
         candidates = data.get("candidates") or []
         if not candidates:
             return "(Gemini: empty response)"
-        parts = (candidates[0].get("content") or {}).get("parts") or []
-        if not parts:
-            return "(Gemini: empty response)"
-        text = (parts[0].get("text") or "").strip()
-        return text or "(Gemini: empty response)"
+        for cand in candidates:
+            if not isinstance(cand, dict):
+                continue
+            content = cand.get("content") or {}
+            parts = content.get("parts") or []
+            if not isinstance(parts, list) or not parts:
+                continue
+            text_parts = []
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                piece = (part.get("text") or "").strip()
+                if piece:
+                    text_parts.append(piece)
+            merged = " ".join(text_parts).strip()
+            if merged:
+                return merged
+        return "(Gemini: empty response)"
     except (KeyError, IndexError, TypeError) as exc:  # noqa: BLE001
         return f"(Gemini parse error: {exc})"
 
