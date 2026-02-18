@@ -1198,13 +1198,36 @@ def _run_turn_brain_sentence(
 def _warmup(args: Any, emotion_classifier: Optional[EmotionClassifierONNX]) -> None:
     """Warm-up all major components: STT, TTS, Emotion, Intent Router, LLMs."""
     print("[Warmup] Initializing all modules...", flush=True)
+    warmup_all_onnx = os.environ.get("WARMUP_ALL_ONNX", "1").strip() not in {
+        "0",
+        "false",
+        "False",
+        "no",
+        "NO",
+    }
     
     # 1. STT Recognizer (sherpa-onnx OnlineRecognizer)
     print("[Warmup] Loading STT recognizer...", flush=True)
-    stt_sherpa.get_recognizer()
-    if args.vad:
+    try:
+        recognizer = stt_sherpa.get_recognizer()
+        if recognizer is not None:
+            # Prime first decode path with short silence.
+            stream = recognizer.create_stream()
+            stream.accept_waveform(stt_sherpa.SAMPLE_RATE, np.zeros(1600, dtype=np.float32))
+            while recognizer.is_ready(stream):
+                recognizer.decode_stream(stream)
+            stream.input_finished()
+            while recognizer.is_ready(stream):
+                recognizer.decode_stream(stream)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[Warmup] STT warning: {exc}", file=sys.stderr)
+
+    if args.vad or warmup_all_onnx:
         print("[Warmup] Loading VAD...", flush=True)
-        stt_sherpa.get_vad()
+        try:
+            _ = stt_sherpa.get_vad()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Warmup] VAD warning: {exc}", file=sys.stderr)
     
     # 2. TTS (sherpa-onnx OfflineTts)
     print("[Warmup] Loading TTS...", flush=True)
@@ -1220,6 +1243,12 @@ def _warmup(args: Any, emotion_classifier: Optional[EmotionClassifierONNX]) -> N
             _ = router_anchors_runtime.route_local_or_cloud("Warmup for routing.")
         except Exception as exc:  # noqa: BLE001
             print(f"[Warmup] Intent router warning: {exc}", file=sys.stderr)
+    if args.router_mode == "short_long":
+        print("[Warmup] Loading short/long router...", flush=True)
+        try:
+            _ = short_long_router.route_query("Warmup for short long routing.")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Warmup] Short/long router warning: {exc}", file=sys.stderr)
     
     # 4. Emotion Classifier (ONNX BERT)
     if ENABLE_EMOTION and emotion_classifier is not None and emotion_classifier.available:
@@ -1228,8 +1257,51 @@ def _warmup(args: Any, emotion_classifier: Optional[EmotionClassifierONNX]) -> N
             _ = emotion_classifier.predict("Hello, just warming up.")
         except Exception as exc:  # noqa: BLE001
             print(f"[Warmup] Emotion warning: {exc}", file=sys.stderr)
+
+    # 5. Memory encoder (MiniLM ONNX) for rolling summary extraction
+    if warmup_all_onnx and getattr(args, "max_turns", 0) > 0:
+        print("[Warmup] Loading memory MiniLM ONNX encoder...", flush=True)
+        try:
+            memory_encoder = text_utils._get_memory_embedding_model()
+            if memory_encoder is not None:
+                _ = memory_encoder.encode(
+                    [
+                        "Warmup memory context one.",
+                        "Warmup memory context two.",
+                    ],
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
+                )
+            else:
+                print("[Warmup] Memory encoder unavailable (fallback summarizer will be used).", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Warmup] Memory ONNX warning: {exc}", file=sys.stderr)
+
+    # 6. Optional ONNX LLM warmup
+    warmup_onnx_llm = getattr(args, "onnx_llm", False) or (
+        os.environ.get("WARMUP_ONNX_LLM", "0").strip() not in {"0", "false", "False", "no", "NO"}
+    )
+    if warmup_onnx_llm:
+        print("[Warmup] Loading ONNX LLM...", flush=True)
+        try:
+            onnx_model, onnx_tokenizer = llm_onnx._load_onnx_llm(args.onnx_model)
+            if onnx_model is not None and onnx_tokenizer is not None:
+                _ = llm_onnx.generate_onnx_llm(
+                    prompt="Warmup",
+                    system=text_utils.ONNX_DEFAULT_SYSTEM,
+                    model=onnx_model,
+                    tokenizer=onnx_tokenizer,
+                    max_new_tokens=4,
+                    temperature=0.0,
+                    max_sentences=1,
+                    max_words=8,
+                )
+            else:
+                print("[Warmup] ONNX LLM unavailable.", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Warmup] ONNX LLM warning: {exc}", file=sys.stderr)
     
-    # 5. Ollama LLM (if enabled)
+    # 7. Ollama LLM (if enabled)
     if args.ollama:
         print(f"[Warmup] Warming up Ollama ({args.ollama_model})...", flush=True)
         try:
