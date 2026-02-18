@@ -407,12 +407,19 @@ def vad_stream_recognize_one(
         print("[sherpa-vad] VAD not available, falling back to endpoint-only mode.", flush=True)
         return stream_recognize_until_endpoint(input_device, max_seconds)
 
-    # Keep ASR stream always running. VAD is used only for utterance boundary.
     window_size = 512
     warmup_windows = 5  # ~0.16s at 16kHz
     speech_active = False
     text = ""
-    stream = recognizer.create_stream()
+    stream = None
+    try:
+        pre_roll_ms = int((os.environ.get("SHERPA_VAD_PRE_ROLL_MS") or "500").strip())
+    except Exception:
+        pre_roll_ms = 500
+    pre_roll_ms = max(0, pre_roll_ms)
+    pre_roll_samples = int((pre_roll_ms / 1000.0) * SAMPLE_RATE)
+    pre_roll_chunks = max(1, (pre_roll_samples + window_size - 1) // window_size) if pre_roll_samples > 0 else 1
+    pre_roll: deque[np.ndarray] = deque(maxlen=pre_roll_chunks)
     t0 = time.perf_counter()
 
     print("[sherpa-vad] Listening... (VAD will detect speech automatically)", flush=True)
@@ -440,22 +447,31 @@ def vad_stream_recognize_one(
 
                 data, _ = mic.read(window_size)
                 samples = data.reshape(-1).astype(np.float32)
-
-                # ASR always-on path: collect/decode continuously.
-                stream.accept_waveform(SAMPLE_RATE, samples)
-                while recognizer.is_ready(stream):
-                    recognizer.decode_stream(stream)
-
-                # VAD only determines turn boundary.
                 vad.accept_waveform(samples)
                 is_speech = vad.is_speech_detected()
+                pre_roll.append(samples)
+
                 if is_speech and not speech_active:
                     speech_active = True
-                    print("[sherpa-vad] speech detected", flush=True)
+                    stream = recognizer.create_stream()
+                    if pre_roll:
+                        try:
+                            lead = np.concatenate(list(pre_roll)).astype(np.float32, copy=False)
+                            if lead.size > 0:
+                                stream.accept_waveform(SAMPLE_RATE, lead)
+                                while recognizer.is_ready(stream):
+                                    recognizer.decode_stream(stream)
+                        except Exception:
+                            pass
+                    print(f"[sherpa-vad] speech detected (pre-roll={pre_roll_ms}ms)", flush=True)
+                elif speech_active and stream is not None:
+                    stream.accept_waveform(SAMPLE_RATE, samples)
+                    while recognizer.is_ready(stream):
+                        recognizer.decode_stream(stream)
 
                 while not vad.empty():
                     vad.pop()
-                    if not speech_active:
+                    if not speech_active or stream is None:
                         continue
 
                     # End of one VAD utterance: finalize current stream snapshot.
@@ -474,19 +490,21 @@ def vad_stream_recognize_one(
 
                     # Prepare next segment even if current segment was empty.
                     speech_active = False
-                    stream = recognizer.create_stream()
+                    stream = None
+                    pre_roll.clear()
     except Exception as exc:  # pragma: no cover
         print(f"[sherpa-vad] error: {exc}", flush=True)
 
     # Timed out: finalize whatever has been collected.
-    try:
-        stream.input_finished()
-        while recognizer.is_ready(stream):
-            recognizer.decode_stream(stream)
-        result = recognizer.get_result(stream)
-        text = str(result).strip()
-    except Exception:
-        pass
+    if speech_active and stream is not None:
+        try:
+            stream.input_finished()
+            while recognizer.is_ready(stream):
+                recognizer.decode_stream(stream)
+            result = recognizer.get_result(stream)
+            text = str(result).strip()
+        except Exception:
+            pass
 
     elapsed = time.perf_counter() - t0
     print(f"[sherpa-vad] final text: {repr(text)} ({elapsed:.2f}s)", flush=True)
