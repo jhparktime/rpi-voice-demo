@@ -1,0 +1,114 @@
+{
+  "total_rows": 10000,
+  "split_sizes": {
+    "train": 9000,
+    "val": 500,
+    "test": 500
+  },
+  "class_distribution": {
+    "empathy": 1500,
+    "semantic": 5800,
+    "generic": 1700,
+    "clarify": 700,
+    "barge_recovery": 300
+  },
+  "class_distribution_by_split": {
+    "train": {
+      "empathy": 1350,
+      "semantic": 5220,
+      "generic": 1530,
+      "clarify": 630,
+      "barge_recovery": 270
+    },
+    "val": {
+      "generic": 85,
+      "semantic": 290,
+      "empathy": 75,
+      "clarify": 35,
+      "barge_recovery": 15
+    },
+    "test": {
+      "clarify": 35,
+      "semantic": 290,
+      "empathy": 75,
+      "generic": 85,
+      "barge_recovery": 15
+    }
+  },
+  "assistant_word_stats": {
+    "avg": 11.649,
+    "min": 8,
+    "max": 15,
+    "p95": 14
+  },
+  "unique_assistant_ratio": 0.0692,
+  "unique_pair_ratio": 1.0,
+  "top_assistant_phrases": [
+    {
+      "text": "i got you, i'll respond with a gentle tone and keep it steady.",
+      "count": 72
+    },
+    {
+      "text": "thanks for sharing that, i'll continue in a gentle tone.",
+      "count": 69
+    },
+    {
+      "text": "i'll hold this carefully and continue in a calm flow.",
+      "count": 69
+    },
+    {
+      "text": "thanks for sharing that, i'll continue in a grounded tone.",
+      "count": 67
+    },
+    {
+      "text": "i hear you, i'll keep this gentle and continue gently.",
+      "count": 67
+    },
+    {
+      "text": "i hear you, i'll keep this supportive and continue gently.",
+      "count": 65
+    },
+    {
+      "text": "i got you, i'll respond with a steady tone and keep it steady.",
+      "count": 65
+    },
+    {
+      "text": "i'll hold this carefully and continue in a supportive flow.",
+      "count": 65
+    },
+    {
+      "text": "thanks for sharing that, i'll continue in a calm tone.",
+      "count": 64
+    },
+    {
+      "text": "thanks for sharing that, i'll continue in a supportive tone.",
+      "count": 64
+    },
+    {
+      "text": "i'll take a breath, keep this grounded, and continue naturally.",
+      "count": 63
+    },
+    {
+      "text": "i'll take a breath, keep this steady, and continue naturally.",
+      "count": 61
+    },
+    {
+      "text": "thanks for sharing that, i'll continue in a steady tone.",
+      "count": 60
+    },
+    {
+      "text": "i hear you, i'll keep this steady and continue gently.",
+      "count": 60
+    },
+    {
+      "text": "i hear you, i'll keep this grounded and continue gently.",
+      "count": 59
+    }
+  ],
+  "reject_count": 1110,
+  "top_reject_reasons": {
+    "duplicate_pair": 748,
+    "contains_number": 360,
+    "forbidden_pattern:\\bsql query\\b": 2
+  }
+}

@@ -16,7 +16,8 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from typing import Generator, Optional, Tuple
+import sys
+from typing import Callable, Generator, Optional, Tuple
 
 import numpy as np
 
@@ -428,6 +429,7 @@ def stream_recognize_sentences(
     input_device: Optional[int] = None,
     sentence_silence_threshold: float = 1.5,
     max_total_seconds: float = 120.0,
+    on_speech_start: Optional[Callable[[], None]] = None,
 ) -> Generator[Tuple[str, float], None, None]:
     """Stream mic continuously, yield each sentence when 1.5s silence detected.
 
@@ -437,6 +439,8 @@ def stream_recognize_sentences(
     - Continues until max_total_seconds or external stop
 
     Yields (sentence_text, elapsed_since_start) tuples.
+    If on_speech_start is provided, it is called once when non-empty text first appears
+    in an active utterance segment (useful to interrupt assistant playback).
     """
     import sounddevice as sd
 
@@ -451,6 +455,7 @@ def stream_recognize_sentences(
     t_session_start = time.perf_counter()
     t_last_text_change = t_session_start
     last_text = ""
+    speech_started = False
     
     print(f"[sherpa-sentence] Listening... (sentence boundary: {sentence_silence_threshold}s silence)", flush=True)
 
@@ -489,6 +494,12 @@ def stream_recognize_sentences(
                     if current_text and not last_text:
                         # Speech started
                         print(f"[sherpa-sentence] speech started", flush=True)
+                        if on_speech_start is not None and not speech_started:
+                            try:
+                                on_speech_start()
+                            except Exception as exc:  # noqa: BLE001
+                                print(f"[sherpa-sentence] speech-start callback error: {exc}", file=sys.stderr, flush=True)
+                            speech_started = True
                     elif current_text:
                         # Text updated
                         print(f"[sherpa-sentence] partial: {repr(current_text)}", flush=True)
@@ -512,6 +523,7 @@ def stream_recognize_sentences(
                     # Reset stream for next sentence
                     recognizer.reset(stream)
                     last_text = ""
+                    speech_started = False
                     t_last_text_change = time.perf_counter()
 
     except GeneratorExit:

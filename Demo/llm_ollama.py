@@ -137,6 +137,7 @@ def stream_ollama_tts_chunks(
     trim_start: float,
     timeout: int = 20,
     first_play_timestamp: Optional[List[float]] = None,
+    stop_event: Optional[Any] = None,
 ) -> str:
     """
     Stream Ollama response (NDJSON), flush on sentence end or max_words, synthesize and play each chunk.
@@ -169,6 +170,8 @@ def stream_ollama_tts_chunks(
         if res.status_code != 200:
             return f"(Ollama error: HTTP {res.status_code})"
         for line in res.iter_lines(decode_unicode=True):
+            if stop_event is not None and stop_event.is_set():
+                return "".join(full_response).strip()
             if not line:
                 continue
             try:
@@ -188,6 +191,8 @@ def stream_ollama_tts_chunks(
                         tts_audio, tts_sr = tts_sherpa.synthesize_sherpa_tts(to_speak)
                         if trim_start > 0.0:
                             tts_audio = audio_io.trim_start_seconds(tts_audio, tts_sr, trim_start)
+                        if stop_event is not None and stop_event.is_set():
+                            break
                         if first_play_timestamp is not None and len(first_play_timestamp) == 0:
                             first_play_timestamp.append(time.perf_counter())
                         audio_io.play_audio(tts_audio, tts_sr, output_device, volume=volume)
@@ -198,14 +203,16 @@ def stream_ollama_tts_chunks(
         # Flush remainder
         if buffer.strip():
             try:
-                tts_audio, tts_sr = tts_sherpa.synthesize_sherpa_tts(buffer.strip())
-                if trim_start > 0.0:
-                    tts_audio = audio_io.trim_start_seconds(tts_audio, tts_sr, trim_start)
-                if first_play_timestamp is not None and len(first_play_timestamp) == 0:
-                    first_play_timestamp.append(time.perf_counter())
-                audio_io.play_audio(tts_audio, tts_sr, output_device, volume=volume)
-            except Exception as e:  # noqa: BLE001
-                print(f"[error] TTS chunk failed: {e}", file=sys.stderr)
+                    tts_audio, tts_sr = tts_sherpa.synthesize_sherpa_tts(buffer.strip())
+                    if trim_start > 0.0:
+                        tts_audio = audio_io.trim_start_seconds(tts_audio, tts_sr, trim_start)
+                    if first_play_timestamp is not None and len(first_play_timestamp) == 0:
+                        first_play_timestamp.append(time.perf_counter())
+                    if stop_event is not None and stop_event.is_set():
+                        return "".join(full_response).strip()
+                    audio_io.play_audio(tts_audio, tts_sr, output_device, volume=volume)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[error] TTS chunk failed: {e}", file=sys.stderr)
         return "".join(full_response).strip()
     except requests.exceptions.Timeout:
         return "(Ollama error: timeout)"
@@ -233,6 +240,7 @@ def stream_ollama_tts_chunks_async(
     trim_start: float,
     timeout: int = 20,
     first_play_timestamp: Optional[List[float]] = None,
+    stop_event: Optional[Any] = None,
 ) -> str:
     """
     Stream Ollama, push text chunks to a queue; Synth thread synthesizes, Play thread plays.
@@ -267,6 +275,9 @@ def stream_ollama_tts_chunks_async(
     def synth_worker() -> None:
         try:
             while True:
+                if stop_event is not None and stop_event.is_set():
+                    audio_queue.put(_AUDIO_SENTINEL)
+                    break
                 chunk_text = text_queue.get()
                 if chunk_text is None:
                     audio_queue.put(_AUDIO_SENTINEL)
@@ -275,6 +286,9 @@ def stream_ollama_tts_chunks_async(
                     tts_audio, tts_sr = tts_sherpa.synthesize_sherpa_tts(chunk_text)
                     if trim_start > 0.0:
                         tts_audio = audio_io.trim_start_seconds(tts_audio, tts_sr, trim_start)
+                    if stop_event is not None and stop_event.is_set():
+                        audio_queue.put(_AUDIO_SENTINEL)
+                        break
                     audio_queue.put((tts_audio, tts_sr))
                 except Exception as e:  # noqa: BLE001
                     print(f"[error] TTS chunk failed: {e}", file=sys.stderr)
@@ -293,6 +307,8 @@ def stream_ollama_tts_chunks_async(
             while True:
                 audio, sr = audio_queue.get()
                 if audio is None:
+                    break
+                if stop_event is not None and stop_event.is_set():
                     break
                 if first_play_timestamp is not None and len(first_play_timestamp) == 0:
                     first_play_timestamp.append(time.perf_counter())
@@ -320,6 +336,8 @@ def stream_ollama_tts_chunks_async(
             play_thread.join(timeout=5.0)
             return f"(Ollama error: HTTP {res.status_code})"
         for line in res.iter_lines(decode_unicode=True):
+            if stop_event is not None and stop_event.is_set():
+                break
             if not line:
                 continue
             try:
@@ -340,6 +358,9 @@ def stream_ollama_tts_chunks_async(
                 break
         if buffer.strip():
             text_queue.put(buffer.strip())
+        if stop_event is not None and stop_event.is_set():
+            text_queue.put(None)
+            return "".join(full_response).strip()
         text_queue.put(None)
     except requests.exceptions.Timeout:
         text_queue.put(None)

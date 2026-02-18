@@ -1,0 +1,17 @@
+{
+  "generated_at_utc": "2026-02-18 10:21:30 UTC",
+  "seed": 42,
+  "backend": "template",
+  "train_size": 8000,
+  "val_size": 1200,
+  "reject_size": 8089,
+  "top_reject_reasons": [
+    [
+      "awkward_phrase_pattern",
+      8089
+    ]
+  ],
+  "train_path": "training/data/filler_train_l40s.jsonl",
+  "val_path": "training/data/filler_val_l40s.jsonl",
+  "reject_path": "training/data/filler_rejects_l40s.jsonl"
+}

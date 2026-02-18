@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import os
 import re
+import numpy as np
 from typing import Any, Dict, List, Optional, Tuple
+
+
+_MEMORY_MINILM_ENCODER: Optional[Any] = None
 
 
 def _limit_words(s: str, max_words: int) -> Tuple[str, bool]:
@@ -294,27 +298,99 @@ def _summarize_turns_fallback(turns: List[Tuple[str, str]], max_words: int) -> s
     return postprocess_output(" ".join(compact), max_sentences=4, max_words=max_words)
 
 
-def _summarize_turns_bert(turns: List[Tuple[str, str]], max_words: int) -> str:
-    model_name = os.environ.get("MEMORY_BERT_SUMMARIZER")
-    if not model_name:
-        return _summarize_turns_fallback(turns, max_words=max_words)
-    try:
-        from transformers import pipeline  # type: ignore
+def _resolve_minilm_model_name() -> str:
+    return (
+        os.environ.get("MEMORY_MINILM_ONNX_DIR", "").strip()
+        or os.environ.get("MEMORY_BERT_SUMMARIZER", "").strip()
+        or "sentence-transformers/all-MiniLM-L6-v2"
+    )
 
-        summarizer = pipeline("summarization", model=model_name)
-        text = " ".join([f"{u} {a}" for u, a in turns]).strip()
-        if not text:
-            return ""
-        result = summarizer(text, max_length=max(20, max_words), min_length=max(12, max_words // 3), do_sample=False)
-        if isinstance(result, list) and result:
-            return postprocess_output(
-                result[0].get("summary_text", ""),
-                max_sentences=4,
-                max_words=max_words,
-            )
+
+def _get_memory_embedding_model() -> Optional[Any]:
+    global _MEMORY_MINILM_ENCODER
+    if _MEMORY_MINILM_ENCODER is not None:
+        return _MEMORY_MINILM_ENCODER
+
+    model_name = _resolve_minilm_model_name()
+    if not model_name:
+        return None
+
+    try:
+        from sentence_transformers import SentenceTransformer  # type: ignore
+
+        _MEMORY_MINILM_ENCODER = SentenceTransformer(model_name)
+        return _MEMORY_MINILM_ENCODER
     except Exception:
-        pass
-    return _summarize_turns_fallback(turns, max_words=max_words)
+        return None
+
+
+def _split_turn_sentences(text: str) -> List[str]:
+    raw = (text or "").strip()
+    if not raw:
+        return []
+    normalized = re.sub(r"\s+", " ", raw)
+    chunks = re.split(r"(?<=[.!?])\s+", normalized)
+    sentences = [chunk.strip() for chunk in chunks if chunk.strip()]
+    if not sentences:
+        return [normalized]
+    return sentences
+
+
+def _extractive_turn_summary(turn: Tuple[str, str], max_words: int) -> str:
+    user, assistant = turn
+    combined = f"{(user or '').strip()} {(assistant or '').strip()}".strip()
+    if not combined:
+        return ""
+
+    candidates = _split_turn_sentences(combined)
+    if len(candidates) == 1:
+        return postprocess_output(candidates[0], max_sentences=1, max_words=max_words)
+
+    try:
+        encoder = _get_memory_embedding_model()
+        if encoder is None:
+            raise RuntimeError("memory_encoder_unavailable")
+
+        embeddings = encoder.encode(candidates, convert_to_numpy=True, normalize_embeddings=True)
+        if embeddings is None or len(embeddings) == 0:
+            raise RuntimeError("memory_embedding_empty")
+
+        arr = np.asarray(embeddings, dtype=np.float32)
+        centroid = np.mean(arr, axis=0)
+        scores = arr @ centroid
+        top_idx = int(np.argmax(scores))
+        return postprocess_output(candidates[top_idx], max_sentences=1, max_words=max_words)
+    except Exception:
+        return _summarize_turns_fallback([turn], max_words=max_words)
+
+def _summarize_text(text: str, max_words: int) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    return postprocess_output(raw, max_sentences=4, max_words=max_words)
+
+
+def _summarize_turns_bert(turns: List[Tuple[str, str]], max_words: int) -> str:
+    if not turns:
+        return ""
+    if len(turns) == 1:
+        return _extractive_turn_summary(turns[0], max_words)
+
+    fragments: List[str] = []
+    per_turn_budget = max(12, max_words // max(1, len(turns)))
+    for turn in turns:
+        fragment = _extractive_turn_summary(turn, max_words=per_turn_budget)
+        if fragment:
+            fragments.append(fragment)
+
+    if not fragments:
+        return ""
+    merged = " ".join(fragments).strip()
+    if not merged:
+        return ""
+    if len(merged.split()) <= max_words:
+        return _summarize_text(merged, max_words=max_words)
+    return _summarize_text(merged, max_words=max_words)
 
 
 def update_memory(
@@ -349,7 +425,34 @@ class ConversationBuffer:
         self.turns: List[Tuple[str, str]] = []
         self._archived_turns: List[Tuple[str, str]] = []
         self.rolling_summary = ""
+        self._summary_fragments: List[str] = []
         self.pinned_facts: Dict[str, str] = {}
+
+    @property
+    def _summary_fragment_budget(self) -> int:
+        if self.max_summary_turns <= 0:
+            return self.summary_word_budget
+        return max(12, self.summary_word_budget // self.max_summary_turns)
+
+    def _append_summary_fragment(self, archived_turn: Tuple[str, str]) -> None:
+        if self.max_summary_turns <= 0:
+            return
+        user, assistant = archived_turn
+        fragment = _summarize_turns_fallback([(user, assistant)], max_words=self._summary_fragment_budget)
+        if fragment:
+            self._summary_fragments.append(fragment)
+            if len(self._summary_fragments) > self.max_summary_turns:
+                self._summary_fragments = self._summary_fragments[-self.max_summary_turns :]
+
+    def _refresh_rolling_summary(self) -> str:
+        if self.max_summary_turns <= 0 or not self._summary_fragments:
+            return ""
+        text = " ".join(self._summary_fragments).strip()
+        if not text:
+            return ""
+        if len(text.split()) <= self.summary_word_budget:
+            return postprocess_output(text, max_sentences=4, max_words=self.summary_word_budget)
+        return _summarize_text(text, max_words=self.summary_word_budget)
 
     def add_turn(self, user_text: str, assistant_reply: str) -> None:
         """Record a completed conversation turn and update rolling memory."""
@@ -362,10 +465,11 @@ class ConversationBuffer:
             self._archived_turns.append(self.turns.pop(0))
             if len(self._archived_turns) > self.max_summary_turns > 0:
                 self._archived_turns = self._archived_turns[-self.max_summary_turns :]
+            self._append_summary_fragment(self._archived_turns[-1])
 
         self.turns.append((user, assistant))
         self.pinned_facts.update(_extract_pinned_facts(user))
-        self.rolling_summary = _summarize_turns_bert(self._archived_turns, max_words=self.summary_word_budget)
+        self.rolling_summary = self._refresh_rolling_summary()
 
     def format_prompt_with_context(self, current_user_text: str) -> str:
         """Build context prompt with summary + pinned facts + recent raw turns."""
@@ -394,6 +498,7 @@ class ConversationBuffer:
     def clear(self) -> None:
         self.turns.clear()
         self._archived_turns.clear()
+        self._summary_fragments.clear()
         self.pinned_facts.clear()
         self.rolling_summary = ""
 

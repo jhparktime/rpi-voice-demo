@@ -5,6 +5,7 @@ data:
   val_file: training/data/filler_val.jsonl
   max_train_samples: null
   max_eval_samples: null
+  max_target_words: 16
 
 output:
   output_dir: outputs/smollm2-135m-filler-lora

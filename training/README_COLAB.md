@@ -14,6 +14,45 @@ Use this when local CPU is too slow for LoRA fine-tuning.
 %cd /content/rpi-voice-demo
 ```
 
+## 2-bis) Pre-generated dataset from local machine (recommended)
+
+If you already generated `filler_train_l40s.jsonl` and `filler_val_l40s.jsonl` locally, skip Colab dataset build and pull them by cloning your branch.
+
+### Local machine: generate + commit
+
+```bash
+cd /Users/parkjaehyun/Desktop/rpi-voice-demo
+python training/build_filler_dataset.py \
+  --train-size 8000 --val-size 1200 \
+  --seed 42 \
+  --teacher-backend template \
+  --n-candidates 6 \
+  --synthetic-sources 10000 \
+  --min-words 6 --max-words 16 \
+  --max-per-phrase 4 \
+  --strict-filter \
+  --topic-aware-templates \
+  --out-train training/data/filler_train_l40s.jsonl \
+  --out-val training/data/filler_val_l40s.jsonl \
+  --out-rejects training/data/filler_rejects_l40s.jsonl
+
+git add training/data/filler_train_l40s.jsonl training/data/filler_val_l40s.jsonl training/data/filler_rejects_l40s.jsonl training/data/.filler_l40s_generation_meta.json
+git commit -m "Update L40S filler dataset" \
+  && git push
+```
+
+Then on Colab, after cloning:
+
+```bash
+%cd /content/rpi-voice-demo
+!git fetch --all
+!git checkout <YOUR_BRANCH>
+!git pull
+!ls -l training/data/filler_train_l40s.jsonl training/data/filler_val_l40s.jsonl
+```
+
+After this, continue to step 3.
+
 ## 3) Install dependencies
 
 ```bash

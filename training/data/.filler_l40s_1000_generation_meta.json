@@ -1,6 +1,6 @@
 {
-  "generated_at_utc": "2026-02-18 10:22:57 UTC",
-  "set_name": "l40s_1000_seed42_template",
+  "generated_at_utc": "2026-02-18 10:24:28 UTC",
+  "set_name": "l40s_1000_seed42_template_refined",
   "seed": 42,
   "teacher_backend": "template",
   "train_size": 1000,
