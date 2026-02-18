@@ -270,9 +270,9 @@ def _extract_pinned_facts(statement: str) -> Dict[str, str]:
         return {}
     facts: Dict[str, str] = {}
     patterns: Dict[str, re.Pattern[str]] = {
-        "name": re.compile(r"\b(?:my name is|i am|i'm)\s+([A-Za-z][A-Za-z0-9_\\- ]{1,64})", re.IGNORECASE),
-        "location": re.compile(r"\b(?:i live in|i am in|i'm in)\s+([A-Za-z][A-Za-z0-9_\\- ]{1,64})", re.IGNORECASE),
-        "preference": re.compile(r"\b(?:i prefer|i like|i need)\s+([A-Za-z][A-Za-z0-9_\\- ]{1,64})", re.IGNORECASE),
+        "name": re.compile(r"\b(?:my name is|i am|i'm)\s+([A-Za-z][A-Za-z0-9_\- ]{1,64})", re.IGNORECASE),
+        "location": re.compile(r"\b(?:i live in|i am in|i'm in)\s+([A-Za-z][A-Za-z0-9_\- ]{1,64})", re.IGNORECASE),
+        "preference": re.compile(r"\b(?:i prefer|i like|i need)\s+([A-Za-z][A-Za-z0-9_\- ]{1,64})", re.IGNORECASE),
     }
     for key, pattern in patterns.items():
         match = pattern.search(text)
@@ -302,8 +302,158 @@ def _resolve_minilm_model_name() -> str:
     return (
         os.environ.get("MEMORY_MINILM_ONNX_DIR", "").strip()
         or os.environ.get("MEMORY_BERT_SUMMARIZER", "").strip()
-        or "sentence-transformers/all-MiniLM-L6-v2"
+        or "Xenova/all-MiniLM-L6-v2"
     )
+
+
+def _resolve_minilm_snapshot_dir(model_name: str) -> str:
+    """Resolve local directory for MiniLM ONNX bundle (path or HF repo id)."""
+    from pathlib import Path
+
+    value = (model_name or "").strip()
+    if not value:
+        return ""
+
+    local_dir = Path(value).expanduser()
+    if local_dir.exists():
+        return str(local_dir)
+
+    cache_dir = (os.environ.get("MEMORY_MINILM_CACHE_DIR") or "").strip() or None
+    try:
+        from huggingface_hub import snapshot_download  # type: ignore
+
+        snap = snapshot_download(
+            repo_id=value,
+            cache_dir=cache_dir,
+            allow_patterns=[
+                "onnx/*.onnx",
+                "*.onnx",
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "special_tokens_map.json",
+                "vocab.json",
+                "merges.txt",
+                "spiece.model",
+                "config.json",
+            ],
+        )
+        return str(Path(snap))
+    except Exception:
+        return ""
+
+
+def _resolve_minilm_onnx_path(model_dir: str) -> str:
+    """Pick ONNX graph path from a MiniLM model directory."""
+    from pathlib import Path
+
+    base = Path(model_dir).expanduser()
+    candidates = [
+        base / "model.int8.onnx",
+        base / "model.onnx",
+        base / "onnx" / "model.int8.onnx",
+        base / "onnx" / "model.onnx",
+    ]
+    for path in candidates:
+        if path.exists():
+            return str(path)
+    return ""
+
+
+class _MiniLMOnnxEncoder:
+    """Minimal ONNX sentence encoder compatible with extractive memory scoring."""
+
+    def __init__(self, model_dir: str) -> None:
+        from pathlib import Path
+        from transformers import AutoTokenizer  # type: ignore
+        import onnxruntime as ort  # type: ignore
+
+        base = Path(model_dir).expanduser()
+        onnx_path = _resolve_minilm_onnx_path(str(base))
+        if not onnx_path:
+            raise FileNotFoundError(f"MiniLM ONNX graph not found under: {base}")
+
+        tokenizer_dir = base
+        if not (tokenizer_dir / "tokenizer.json").exists():
+            onnx_tok_dir = base / "onnx"
+            if (onnx_tok_dir / "tokenizer.json").exists():
+                tokenizer_dir = onnx_tok_dir
+
+        self.tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir))
+        self.max_length = int(os.environ.get("MEMORY_MINILM_MAX_LENGTH", "256"))
+        self.session = ort.InferenceSession(
+            onnx_path,
+            providers=["CPUExecutionProvider"],
+        )
+        self.input_names = [i.name for i in self.session.get_inputs()]
+
+    def encode(
+        self,
+        sentences: Any,
+        convert_to_numpy: bool = True,
+        normalize_embeddings: bool = True,
+    ) -> np.ndarray:
+        if isinstance(sentences, str):
+            texts = [sentences]
+        else:
+            texts = [str(s) for s in (sentences or [])]
+
+        if not texts:
+            return np.zeros((0, 384), dtype=np.float32)
+
+        tokenized = self.tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            max_length=max(8, self.max_length),
+            return_tensors="np",
+        )
+        input_ids = np.asarray(tokenized["input_ids"], dtype=np.int64)
+        attention_mask = np.asarray(
+            tokenized.get("attention_mask", np.ones_like(input_ids)),
+            dtype=np.int64,
+        )
+
+        feeds: Dict[str, np.ndarray] = {}
+        for name in self.input_names:
+            if name in tokenized:
+                feeds[name] = np.asarray(tokenized[name], dtype=np.int64)
+            elif name == "input_ids":
+                feeds[name] = input_ids
+            elif name == "attention_mask":
+                feeds[name] = attention_mask
+            elif name == "token_type_ids":
+                feeds[name] = np.zeros_like(input_ids, dtype=np.int64)
+            else:
+                feeds[name] = input_ids
+
+        raw_outputs = self.session.run(None, feeds)
+        token_embeddings: Optional[np.ndarray] = None
+        sentence_embeddings: Optional[np.ndarray] = None
+
+        for out in raw_outputs:
+            arr = np.asarray(out)
+            if arr.ndim == 3 and token_embeddings is None:
+                token_embeddings = arr
+            elif arr.ndim == 2 and sentence_embeddings is None:
+                sentence_embeddings = arr
+
+        if token_embeddings is not None:
+            mask = attention_mask.astype(np.float32)[..., None]
+            summed = (token_embeddings * mask).sum(axis=1)
+            denom = np.clip(mask.sum(axis=1), 1e-6, None)
+            sent = summed / denom
+        elif sentence_embeddings is not None:
+            sent = sentence_embeddings
+        else:
+            raise RuntimeError("MiniLM ONNX output shape is not supported.")
+
+        embeddings = np.asarray(sent, dtype=np.float32)
+        if normalize_embeddings and embeddings.size > 0:
+            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+            embeddings = embeddings / np.clip(norms, 1e-12, None)
+        if convert_to_numpy:
+            return embeddings
+        return embeddings
 
 
 def _get_memory_embedding_model() -> Optional[Any]:
@@ -316,9 +466,10 @@ def _get_memory_embedding_model() -> Optional[Any]:
         return None
 
     try:
-        from sentence_transformers import SentenceTransformer  # type: ignore
-
-        _MEMORY_MINILM_ENCODER = SentenceTransformer(model_name)
+        model_dir = _resolve_minilm_snapshot_dir(model_name)
+        if not model_dir:
+            return None
+        _MEMORY_MINILM_ENCODER = _MiniLMOnnxEncoder(model_dir)
         return _MEMORY_MINILM_ENCODER
     except Exception:
         return None
