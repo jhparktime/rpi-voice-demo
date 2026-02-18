@@ -679,13 +679,13 @@ def _run_gemini_turn(
             assistant_reply = text_utils.postprocess_output(
                 cloud_reply,
                 max_sentences=2,
-                max_words=60,
+                max_words=120,
             )
         else:
             assistant_reply = text_utils.postprocess_output(
                 cloud_reply,
-                max_sentences=20,
-                max_words=220,
+                max_sentences=4,
+                max_words=260,
             )
     else:
         assistant_reply = user_text
