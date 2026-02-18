@@ -709,12 +709,10 @@ def _run_gemini_turn(
             tts_audio = audio_io.trim_start_seconds(tts_audio, tts_sr, args.trim_start)
         return assistant_reply, tts_audio, tts_sr
 
-    max_words_per_chunk = getattr(args, "cloud_tts_max_words_per_chunk", 20)
-    chunks = text_utils.split_into_chunks(assistant_reply, max_words_per_chunk=max_words_per_chunk)
-    if not chunks:
-        chunks = [assistant_reply]
-
-    print(f"[GEMINI] Streaming {len(chunks)} chunk(s)...", flush=True)
+    # Do not split Gemini output into sentence/word chunks in demo mode.
+    # Play full response as a single TTS chunk for more natural continuity.
+    chunks = [assistant_reply]
+    print("[GEMINI] Streaming disabled; playing full response as one chunk...", flush=True)
     t_tts_start = time.perf_counter()
     _, _ = _play_chunks_pipelined(chunks, tts, voice, args, filler_player=filler_player)
     t_tts_end = time.perf_counter()
