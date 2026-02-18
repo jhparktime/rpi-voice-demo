@@ -13,7 +13,6 @@ Provides four recognition modes:
 """
 from __future__ import annotations
 
-from collections import deque
 import os
 import time
 from pathlib import Path
@@ -330,17 +329,12 @@ def vad_stream_recognize_one(
 
     # silero-vad window size (must match config)
     window_size = 512
-    pre_roll_windows = 8  # ~256ms of leading audio to avoid clipping first word
     # Warm-up: number of windows to read and discard before feeding VAD/ASR.
     # This helps avoid cutting off the first word on some devices.
     warmup_windows = 5  # ~0.16s at 16kHz
     speech_active = False
     stream = None
     text = ""
-    empty_segments = 0
-    fallback_endpoint = False
-    fallback_remaining = max_seconds
-    pre_roll_buffer = deque(maxlen=pre_roll_windows)
     t0 = time.perf_counter()
 
     print("[sherpa-vad] Listening... (VAD will detect speech automatically)", flush=True)
@@ -378,10 +372,6 @@ def vad_stream_recognize_one(
                 if is_speech and not speech_active:
                     speech_active = True
                     stream = recognizer.create_stream()
-                    if pre_roll_buffer:
-                        pre_roll = np.concatenate(list(pre_roll_buffer)).astype(np.float32, copy=False)
-                        if pre_roll.size > 0:
-                            stream.accept_waveform(SAMPLE_RATE, pre_roll)
                     print("[sherpa-vad] speech detected", flush=True)
 
                 # Feed audio to recognizer while speech is active
@@ -389,9 +379,6 @@ def vad_stream_recognize_one(
                     stream.accept_waveform(SAMPLE_RATE, samples)
                     while recognizer.is_ready(stream):
                         recognizer.decode_stream(stream)
-
-                # Keep a small rolling pre-roll buffer for next utterance start.
-                pre_roll_buffer.append(samples)
 
                 # Check for complete speech segments from VAD
                 while not vad.empty():
@@ -414,25 +401,8 @@ def vad_stream_recognize_one(
                         if text:
                             elapsed = time.perf_counter() - t0
                             return text, elapsed
-                        empty_segments += 1
-                        if empty_segments >= 2:
-                            fallback_endpoint = True
-                            fallback_remaining = max(2.0, max_seconds - (time.perf_counter() - t0))
-                            print(
-                                "[sherpa-vad] repeated empty segments; fallback to endpoint mode.",
-                                flush=True,
-                            )
-                            break
-                if fallback_endpoint:
-                    break
     except Exception as exc:  # pragma: no cover
         print(f"[sherpa-vad] error: {exc}", flush=True)
-
-    if fallback_endpoint:
-        return stream_recognize_until_endpoint(
-            input_device=input_device,
-            max_seconds=fallback_remaining,
-        )
 
     # If we timed out but had an active stream, try to get partial result
     if speech_active and stream is not None:
