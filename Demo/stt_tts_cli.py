@@ -224,27 +224,6 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         default=env_int("FILLER_DELAY_MS", "filler_delay_ms"),
         help="Wait this long before playing LONG filler (ms).",
     )
-    parser.add_argument("--barge-in", action="store_true", default=True, help="Enable barge-in: stop playback when user speaks.")
-    parser.add_argument("--no-barge-in", action="store_false", dest="barge_in", help="Disable barge-in interruption.")
-    parser.add_argument(
-        "--barge-in-energy-threshold",
-        type=float,
-        default=0.02,
-        help="VAD-free barge-in energy threshold (higher = fewer false positives).",
-    )
-    parser.add_argument(
-        "--barge-in-window-ms",
-        type=int,
-        default=80,
-        help="Window length (ms) for each barge-in microphone check.",
-    )
-    parser.add_argument(
-        "--barge-in-hit-count",
-        type=int,
-        default=2,
-        help="Consecutive windows required before treating as barge-in speech.",
-    )
-
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
@@ -293,10 +272,6 @@ def print_config(args: argparse.Namespace, voice: str) -> None:
         "memory_max_summary_turns",
         "memory_summary_word_budget",
         "dialog_profile",
-        "barge_in",
-        "barge_in_energy_threshold",
-        "barge_in_window_ms",
-        "barge_in_hit_count",
     ]:
         if hasattr(args, key):
             d[key] = _arg_to_json_value(getattr(args, key))

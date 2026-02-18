@@ -9,7 +9,7 @@ import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from queue import Queue
-from threading import Event, Thread
+from threading import Thread
 from typing import Any, Iterable, List, Optional, Tuple
 
 import numpy as np
@@ -89,113 +89,13 @@ def _synthesize_tts(tts: Any, voice: str, text: str, speed: float = 1.0) -> Tupl
     return audio, sr
 
 
-def _watch_for_barge_in(
-    input_device: Optional[int],
-    stop_event: Event,
-    interrupted_event: Event,
-    args: Any,
-    set_stop_on_interrupt: bool = False,
-) -> None:
-    """Detect user speech from microphone and trigger interrupt if threshold is exceeded."""
-    if not getattr(args, "barge_in", True):
-        return
-
-    try:
-        import sounddevice as sd
-    except Exception as exc:  # noqa: BLE001
-        print(f"[barge-in] sounddevice unavailable: {exc}", file=sys.stderr, flush=True)
-        return
-
-    threshold = float(getattr(args, "barge_in_energy_threshold", 0.02))
-    window_ms = int(getattr(args, "barge_in_window_ms", 80))
-    hit_count = max(1, int(getattr(args, "barge_in_hit_count", 2)))
-    sample_rate = stt_sherpa.SAMPLE_RATE
-    window_samples = max(16, int(sample_rate * max(20, window_ms) / 1000.0))
-
-    if threshold <= 0.0:
-        return
-
-    hits = 0
-    try:
-        with sd.InputStream(
-            samplerate=sample_rate,
-            channels=1,
-            dtype="float32",
-            device=input_device,
-        ) as mic:
-            while not stop_event.is_set():
-                data, _ = mic.read(window_samples)
-                if not isinstance(data, np.ndarray) or data.size <= 0:
-                    continue
-                level = float(np.mean(np.abs(data.reshape(-1).astype(np.float32))))
-                if level >= threshold:
-                    hits += 1
-                    if hits >= hit_count:
-                        interrupted_event.set()
-                        break
-                else:
-                    hits = 0
-                if set_stop_on_interrupt and interrupted_event.is_set():
-                    stop_event.set()
-                    break
-    except Exception as exc:  # noqa: BLE001
-        if not stop_event.is_set():
-            print(f"[barge-in] detection error: {exc}", file=sys.stderr, flush=True)
-
-
-def _wait_player_with_barge_in(
-    player: audio_io.AudioPlayer,
-    args: Any,
-) -> bool:
-    """Wait for playback to finish and return True if barge-in was detected."""
-    if player is None:
-        return False
-
-    stop_event = Event()
-    interrupted_event = Event()
-    watcher = None
-    if getattr(args, "barge_in", False):
-        watcher = Thread(
-            target=_watch_for_barge_in,
-            args=(getattr(args, "input_device", None), stop_event, interrupted_event, args),
-            daemon=True,
-        )
-        watcher.start()
-
-    try:
-        while player.is_playing():
-            if interrupted_event.is_set():
-                player.stop()
-                break
-            time.sleep(0.01)
-    finally:
-        stop_event.set()
-        player.wait()
-        if watcher is not None:
-            watcher.join(timeout=0.3)
-
-    if interrupted_event.is_set():
-        print("[barge-in] detected; playback interrupted.", flush=True)
-        return True
-    return False
-
-
 def _play_audio_with_barge_in(audio: np.ndarray, sample_rate: int, args: Any) -> bool:
-    """Play one TTS chunk with barge-in support."""
+    """Play one TTS chunk (barge-in removed; kept for call compatibility)."""
     if not audio.size or sample_rate <= 0:
         return False
 
-    if not getattr(args, "barge_in", False):
-        audio_io.play_audio(audio, sample_rate, args.output_device, volume=args.volume)
-        return False
-
-    player = audio_io.play_audio_interruptible(
-        audio,
-        sample_rate,
-        args.output_device,
-        volume=args.volume,
-    )
-    return _wait_player_with_barge_in(player, args)
+    audio_io.play_audio(audio, sample_rate, args.output_device, volume=args.volume)
+    return False
 
 
 def _play_chunks_pipelined(
@@ -218,7 +118,6 @@ def _play_chunks_pipelined(
 
     t0 = time.perf_counter()
     tts_queue: Queue = Queue(maxsize=2)  # Buffer up to 2 chunks ahead
-    stop_playback = Event()
     audio_chunks = []
     sample_rate = None
     
@@ -226,8 +125,6 @@ def _play_chunks_pipelined(
         """Background thread: TTS all chunks and push to queue."""
         first_done_logged = False
         for i, chunk in enumerate(chunks):
-            if stop_playback.is_set():
-                break
             chunk = chunk.strip()
             if not chunk:
                 continue
@@ -266,12 +163,8 @@ def _play_chunks_pipelined(
         
         # First chunk: wait for filler to finish, then log TTFS
         if first_chunk and filler_player and filler_player.is_playing():
-            print("[Cloud] Waiting for filler to finish (or barge-in)...", flush=True)
-            filler_interrupted = _wait_player_with_barge_in(filler_player, args)
-            if filler_interrupted:
-                stop_playback.set()
-                print("[Cloud] Filler interrupted by barge-in.", flush=True)
-                break
+            print("[Cloud] Waiting for filler to finish...", flush=True)
+            filler_player.wait()
         if first_chunk:
             print(
                 f"  [LATENCY] TTFS: {time.perf_counter() - t0:.2f}s",
@@ -292,11 +185,7 @@ def _play_chunks_pipelined(
         print(f"  Playing chunk {chunk_idx+1}/{len(chunks)}...", flush=True)
         t_play_start = time.perf_counter()
         try:
-            interrupted = _play_audio_with_barge_in(chunk_audio, chunk_sr, args)
-            if interrupted:
-                stop_playback.set()
-                print("[Cloud] Response interrupted by barge-in.", flush=True)
-                break
+            _play_audio_with_barge_in(chunk_audio, chunk_sr, args)
         except Exception as exc:  # noqa: BLE001
             print(f"[error] playback chunk {chunk_idx+1} failed: {exc}", file=sys.stderr)
         t_play_end = time.perf_counter()
@@ -367,17 +256,6 @@ def _run_turn_ollama_stream(t0: float, args: Any, text: str, tts: Any, voice: st
     t_ollama_start = time.perf_counter()
     first_play_ts: List[float] = []
 
-    barge_watch_stop = Event()
-    barge_watch_interrupt = Event()
-    barge_watcher: Optional[Thread] = None
-    if getattr(args, "barge_in", False):
-        barge_watcher = Thread(
-            target=_watch_for_barge_in,
-            args=(args.input_device, barge_watch_stop, barge_watch_interrupt, args, True),
-            daemon=True,
-        )
-        barge_watcher.start()
-
     if args.ollama_stream_async:
         reply = llm_ollama.stream_ollama_tts_chunks_async(
             prompt=text,
@@ -399,7 +277,7 @@ def _run_turn_ollama_stream(t0: float, args: Any, text: str, tts: Any, voice: st
             trim_start=args.trim_start,
             timeout=20,
             first_play_timestamp=first_play_ts,
-            stop_event=barge_watch_stop,
+            stop_event=None,
         )
     else:
         reply = llm_ollama.stream_ollama_tts_chunks(
@@ -422,12 +300,8 @@ def _run_turn_ollama_stream(t0: float, args: Any, text: str, tts: Any, voice: st
             trim_start=args.trim_start,
             timeout=20,
             first_play_timestamp=first_play_ts,
-            stop_event=barge_watch_stop,
+            stop_event=None,
         )
-
-    barge_watch_stop.set()
-    if barge_watcher is not None:
-        barge_watcher.join(timeout=0.3)
 
     t_ollama_end = time.perf_counter()
     if first_play_ts:
@@ -437,8 +311,6 @@ def _run_turn_ollama_stream(t0: float, args: Any, text: str, tts: Any, voice: st
         print(f"[LLM] {reply}", flush=True)
     elif reply:
         print(reply, flush=True)
-    if barge_watch_interrupt.is_set():
-        print("[barge-in] interrupted during Ollama stream playback.", flush=True)
     print(f"[time] total: {t_ollama_end - t0:.2f}s", flush=True)
 
 
@@ -1640,20 +1512,12 @@ def _main_loop_sentence_streaming(
 
         print(f"[sentence-streaming] Session started (speak naturally, {args.sentence_silence:.1f}s pauses = sentence boundaries)", flush=True)
 
-        def _stop_current_player() -> None:
-            """Interrupt current assistant playback when user speech starts."""
-            nonlocal current_player
-            if current_player is not None and current_player.is_playing():
-                print("[sentence-streaming][barge-in] user speech detected, interrupting assistant", flush=True)
-                current_player.stop()
-                current_player = None
-
         try:
             for sentence_text, elapsed in stt_sherpa.stream_recognize_sentences(
                 input_device=args.input_device,
                 sentence_silence_threshold=args.sentence_silence,
                 max_total_seconds=args.max_listen_seconds,
-                on_speech_start=_stop_current_player if getattr(args, "barge_in", False) else None,
+                on_speech_start=None,
             ):
                 sentence_count += 1
                 print(f"[ASR-sentence-{sentence_count}] {sentence_text}", flush=True)
