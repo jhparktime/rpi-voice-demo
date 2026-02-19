@@ -11,11 +11,12 @@ cd "$ROOT_DIR"
 export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
 OUT_DIR="${OUT_DIR:-outputs/ablation_$(date +%Y%m%d_%H%M%S)}"
-REPEATS="${REPEATS:-5}"
+REPEATS="${REPEATS:-3}"
 PROMPT_MULTIPLIER="${PROMPT_MULTIPLIER:-10}"
 BASE_MODEL="${BASE_MODEL:-HuggingFaceTB/SmolLM2-135M-Instruct}"
 ADAPTER_DIR="${ADAPTER_DIR:-outputs/smollm2-135m-filler-lora}"
 DEVICE="${DEVICE:-cpu}"
+INTER_CALL_SLEEP="${INTER_CALL_SLEEP:-1.0}"
 
 mkdir -p "$OUT_DIR"
 
@@ -28,12 +29,14 @@ else
   python training/run_cloud_onoff_ablation.py \
     --filler-provider smollm2 \
     --repeats "$REPEATS" \
+    --inter-call-sleep "$INTER_CALL_SLEEP" \
     --out "$OUT_DIR/cloud_long_filler_on.json"
 
   echo "[ablation] running cloud LONG filler OFF..."
   python training/run_cloud_onoff_ablation.py \
     --filler-provider off \
     --repeats "$REPEATS" \
+    --inter-call-sleep "$INTER_CALL_SLEEP" \
     --out "$OUT_DIR/cloud_long_filler_off.json"
 fi
 

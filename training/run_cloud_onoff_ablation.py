@@ -97,6 +97,7 @@ def run_ablation(
     filler_provider: str,
     delay_ms: int,
     timeout_s: float,
+    inter_call_sleep: float,
 ) -> Dict[str, Any]:
     rows: List[Dict[str, Any]] = []
     delay_s = max(0.0, float(delay_ms) / 1000.0)
@@ -157,6 +158,8 @@ def run_ablation(
             }
             row["filler_policy"] = _evaluate_filler_policy(filler_text) if filler_text else {}
             rows.append(row)
+            if inter_call_sleep > 0:
+                time.sleep(inter_call_sleep)
 
     first_signal = [r["first_signal_s"] for r in rows]
     cloud_ready = [r["cloud_ready_s"] for r in rows]
@@ -185,6 +188,9 @@ def run_ablation(
         policy_violation_rate = 0.0
         hallucination_proxy_rate = 0.0
 
+    error_like_count = sum(1 for r in rows if (r.get("cloud_reply") or "").startswith("("))
+    http_429_count = sum(1 for r in rows if "429" in (r.get("cloud_reply") or ""))
+
     summary = {
         "filler_provider": filler_provider,
         "turns": len(rows),
@@ -198,6 +204,8 @@ def run_ablation(
         "filler_count": len(fillers),
         "policy_violation_rate": round(policy_violation_rate, 4),
         "hallucination_proxy_forbidden_rate": round(hallucination_proxy_rate, 4),
+        "error_like_count": error_like_count,
+        "http_429_count": http_429_count,
     }
     return {"summary": summary, "rows": rows}
 
@@ -209,6 +217,7 @@ def main() -> None:
     ap.add_argument("--filler-provider", choices=["smollm2", "off"], default="smollm2")
     ap.add_argument("--delay-ms", type=int, default=800)
     ap.add_argument("--timeout-s", type=float, default=20.0)
+    ap.add_argument("--inter-call-sleep", type=float, default=1.0)
     ap.add_argument("--out", type=str, required=True)
     args = ap.parse_args()
 
@@ -219,6 +228,7 @@ def main() -> None:
         filler_provider=args.filler_provider,
         delay_ms=args.delay_ms,
         timeout_s=args.timeout_s,
+        inter_call_sleep=max(0.0, args.inter_call_sleep),
     )
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
