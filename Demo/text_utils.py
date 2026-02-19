@@ -141,6 +141,9 @@ def validate_cloud_filler_output(text: str, min_words: int = 3, max_words: int =
     if not s:
         return None
     s = " ".join([ln.strip() for ln in s.splitlines() if ln.strip()]).strip().strip("\"'")
+    # Normalize ellipsis-like endings to a plain sentence boundary.
+    s = s.replace("…", ".")
+    s = re.sub(r"\.{2,}", ".", s)
     if not s:
         return None
     if "?" in s or re.search(r"\d", s):
@@ -150,6 +153,9 @@ def validate_cloud_filler_output(text: str, min_words: int = 3, max_words: int =
     if len(re.findall(r"[.!?]+", s)) > 1:
         return None
     if any(p.search(s) for p in _FILLER_FORBIDDEN_PATTERNS):
+        return None
+    # Reject clearly truncated endings ("with the.", "to.", ...).
+    if re.search(r"\b(?:the|a|an|to|for|with|of|in|on|at|by|from|and|or|but)\.?\s*$", s, re.IGNORECASE):
         return None
     words = s.split()
     if len(words) < min_words or len(words) > max_words:
