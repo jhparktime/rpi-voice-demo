@@ -15,7 +15,13 @@ GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
 
-def _call_openai(prompt: str, system: str, timeout: float, max_output_tokens: int = 512, temperature: float = 0.7) -> str:
+def _call_openai(
+    prompt: str,
+    system: str,
+    timeout: float,
+    max_output_tokens: int | None = None,
+    temperature: float = 0.7,
+) -> str:
     """Call OpenAI Chat Completions API (GPT-4o, gpt-4o-mini, etc.)."""
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
@@ -30,9 +36,10 @@ def _call_openai(prompt: str, system: str, timeout: float, max_output_tokens: in
             {"role": "system", "content": (system or "").strip()},
             {"role": "user", "content": (prompt or "").strip()},
         ],
-        "max_tokens": max_output_tokens,
         "temperature": temperature,
     }
+    if max_output_tokens is not None and int(max_output_tokens) > 0:
+        payload["max_tokens"] = int(max_output_tokens)
 
     headers: Dict[str, str] = {
         "Content-Type": "application/json",
@@ -66,7 +73,7 @@ def _call_gemini(
     prompt: str,
     system: str,
     timeout: float,
-    max_output_tokens: int = 512,
+    max_output_tokens: int | None = None,
     temperature: float = 0.7,
 ) -> str:
     """Call Google Gemini API (e.g. Gemini 2.5 Flash free tier)."""
@@ -78,13 +85,16 @@ def _call_gemini(
     print(f"[Cloud] Calling Gemini API ({model})...", flush=True)
     url = f"{GEMINI_BASE}/{model}:generateContent?key={api_key}"
 
+    generation_config: Dict[str, Any] = {
+        "temperature": temperature,
+    }
+    if max_output_tokens is not None and int(max_output_tokens) > 0:
+        generation_config["maxOutputTokens"] = int(max_output_tokens)
+
     payload: Dict[str, Any] = {
         "contents": [{"role": "user", "parts": [{"text": (prompt or "").strip()}]}],
         "systemInstruction": {"parts": [{"text": (system or "").strip()}]},
-        "generationConfig": {
-            "maxOutputTokens": max_output_tokens,
-            "temperature": temperature,
-        },
+        "generationConfig": generation_config,
     }
 
     try:
@@ -130,7 +140,7 @@ def call_cloud_llm(
     prompt: str,
     system: str,
     timeout: float = 20.0,
-    max_output_tokens: int = 512,
+    max_output_tokens: int | None = None,
     temperature: float = 0.7,
     preferred_provider: str | None = None,
 ) -> str:

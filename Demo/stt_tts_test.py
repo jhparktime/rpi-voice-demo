@@ -616,9 +616,7 @@ def _run_gemini_turn(
 ) -> Tuple[Optional[str], Optional[np.ndarray], Optional[int]]:
     """Run Gemini (SHORT/LONG), with optional long-mode filler delay gate."""
     gemini_prompt = _build_gemini_prompt(route_mode, prompt_context)
-    gemini_tokens = (
-        args.gemini_short_max_tokens if route_mode == "SHORT" else args.gemini_long_max_tokens
-    )
+    gemini_tokens = None
 
     def _call_gemini() -> str:
         return cloud_llm.call_cloud_llm(
@@ -679,13 +677,13 @@ def _run_gemini_turn(
             assistant_reply = text_utils.postprocess_output(
                 cloud_reply,
                 max_sentences=0,
-                max_words=120,
+                max_words=0,
             )
         else:
             assistant_reply = text_utils.postprocess_output(
                 cloud_reply,
                 max_sentences=0,
-                max_words=260,
+                max_words=0,
             )
     else:
         assistant_reply = user_text
@@ -862,11 +860,10 @@ def _run_turn_brain(
 
         # Postprocess Cloud reply length (sentences/words) for RPi-friendly TTS
         if cloud_reply and not cloud_reply.startswith("("):
-            max_words = getattr(args, "cloud_max_words", 60)
             cloud_text = text_utils.postprocess_output(
                 cloud_reply,
                 max_sentences=0,
-                max_words=max_words,
+                max_words=0,
             )
         else:
             cloud_text = text
@@ -1086,11 +1083,10 @@ def _run_turn_brain_sentence(
 
         # Postprocess Cloud reply length (sentences/words) for RPi-friendly TTS
         if cloud_reply and not cloud_reply.startswith("("):
-            max_words = getattr(args, "cloud_max_words", 60)
             cloud_text = text_utils.postprocess_output(
                 cloud_reply,
                 max_sentences=0,
-                max_words=max_words,
+                max_words=0,
             )
         else:
             cloud_text = text
